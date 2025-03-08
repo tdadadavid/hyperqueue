@@ -6,17 +6,18 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, Stream, StreamExt};
-use orion::aead::streaming::StreamOpener;
 use orion::aead::SecretKey;
+use orion::aead::streaming::StreamOpener;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 use tokio::time::timeout;
 
+use crate::WorkerId;
 use crate::comm::{ConnectionRegistration, RegisterWorker};
 use crate::hwstats::WorkerHwStateMessage;
-use crate::internal::common::resources::map::ResourceMap;
-use crate::internal::common::resources::Allocation;
 use crate::internal::common::WrappedRcRefCell;
+use crate::internal::common::resources::Allocation;
+use crate::internal::common::resources::map::ResourceMap;
 use crate::internal::messages::worker::{
     FromWorkerMessage, StealResponseMsg, TaskResourceAllocation, ToWorkerMessage, WorkerOverview,
     WorkerRegistrationResponse, WorkerStopReason,
@@ -28,14 +29,13 @@ use crate::internal::transfer::auth::{
 use crate::internal::transfer::transport::make_protocol_builder;
 use crate::internal::worker::comm::WorkerComm;
 use crate::internal::worker::configuration::{
-    sync_worker_configuration, OverviewConfiguration, ServerLostPolicy, WorkerConfiguration,
+    OverviewConfiguration, ServerLostPolicy, WorkerConfiguration, sync_worker_configuration,
 };
 use crate::internal::worker::hwmonitor::HwSampler;
 use crate::internal::worker::reactor::start_task;
 use crate::internal::worker::state::{WorkerState, WorkerStateRef};
 use crate::internal::worker::task::Task;
 use crate::launcher::TaskLauncher;
-use crate::WorkerId;
 use futures::future::Either;
 use tokio::sync::Notify;
 
@@ -105,7 +105,7 @@ const MAX_WAIT_FOR_RUNNING_TASKS_SHUTDOWN: Duration = Duration::from_secs(5);
 /// Connects to the server and starts a message receiving loop.
 /// The worker will attempt to clean up after itself once it's stopped or once stop_flag is notified.
 pub async fn run_worker(
-    scheduler_addresses: &[SocketAddr],
+    scheduler_addresses: Vec<SocketAddr>,
     mut configuration: WorkerConfiguration,
     secret_key: Option<Arc<SecretKey>>,
     launcher_setup: impl Fn(&str, WorkerId) -> Box<dyn TaskLauncher>,
@@ -122,7 +122,7 @@ pub async fn run_worker(
         mut opener,
         mut sealer,
         ..
-    } = connect_to_server_and_authenticate(scheduler_addresses, &secret_key).await?;
+    } = connect_to_server_and_authenticate(&scheduler_addresses, &secret_key).await?;
     {
         let message = ConnectionRegistration::Worker(RegisterWorker {
             configuration: configuration.clone(),

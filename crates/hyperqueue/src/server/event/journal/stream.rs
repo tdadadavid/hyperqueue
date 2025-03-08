@@ -1,10 +1,10 @@
+use crate::JobId;
 use crate::common::utils::str::pluralize;
+use crate::server::event::Event;
+use crate::server::event::journal::JournalReader;
 use crate::server::event::journal::prune::prune_journal;
 use crate::server::event::journal::write::JournalWriter;
-use crate::server::event::journal::JournalReader;
 use crate::server::event::payload::EventPayload;
-use crate::server::event::Event;
-use crate::JobId;
 use std::ffi::OsString;
 use std::fs::{remove_file, rename};
 use std::future::Future;
@@ -40,7 +40,7 @@ pub fn start_event_streaming(
     writer: JournalWriter,
     log_path: &Path,
     flush_period: Duration,
-) -> (EventStreamSender, impl Future<Output = ()>) {
+) -> (EventStreamSender, impl Future<Output = ()> + use<>) {
     let (tx, rx) = create_event_stream_queue();
     let log_path = log_path.to_path_buf();
     let handle = std::thread::spawn(move || {

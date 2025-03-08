@@ -1,10 +1,10 @@
-use crate::server::autoalloc::state::AllocationQueue;
+use crate::JobId;
 use crate::server::autoalloc::QueueInfo;
+use crate::server::autoalloc::state::AllocationQueue;
 use crate::server::job::Job;
 use crate::server::state::State;
 use crate::server::worker::Worker;
 use crate::transfer::messages::{JobTaskDescription, TaskDescription};
-use crate::JobId;
 use std::time::Duration;
 use tako::Map;
 
@@ -34,7 +34,7 @@ impl ServerTaskState {
         self.jobs = self
             .jobs
             .iter()
-            .filter(|(_, &waiting)| waiting > 0)
+            .filter(|&(_, waiting)| *waiting > 0)
             .map(|(id, waiting)| (*id, *waiting))
             .collect();
     }

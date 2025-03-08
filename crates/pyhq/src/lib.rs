@@ -2,19 +2,19 @@
 // Re-check in version 1.65.0.
 #![allow(clippy::borrow_deref_ref)]
 
+use ::hyperqueue::HQ_VERSION;
+use ::hyperqueue::transfer::connection::ClientSession;
 use pyo3::types::PyModule;
-use pyo3::{pyclass, pyfunction, pymethods, pymodule, FromPyObject, PyAny};
-use pyo3::{wrap_pyfunction, Py, PyResult, Python};
+use pyo3::types::PyModuleMethods;
+use pyo3::{Bound, FromPyObject, PyAny, pyclass, pyfunction, pymethods, pymodule};
+use pyo3::{Py, PyResult, Python, wrap_pyfunction};
 use std::path::PathBuf;
 use tokio::runtime::Builder;
 
-use ::hyperqueue::transfer::connection::ClientSession;
-use ::hyperqueue::HQ_VERSION;
-
-use crate::client::job::{forget_job_impl, FailedTaskMap};
+use crate::client::job::{FailedTaskMap, forget_job_impl};
 use crate::cluster::Cluster;
 use crate::utils::run_future;
-use client::job::{get_failed_tasks_impl, submit_job_impl, wait_for_jobs_impl, PyJobDescription};
+use client::job::{PyJobDescription, get_failed_tasks_impl, submit_job_impl, wait_for_jobs_impl};
 use client::server::{connect_to_server_impl, stop_server_impl};
 
 mod client;
@@ -41,6 +41,7 @@ fn get_hq_version() -> String {
 }
 
 #[pyfunction]
+#[pyo3(signature = (directory))]
 fn connect_to_server(py: Python, directory: Option<String>) -> PyResult<ClientContextPtr> {
     connect_to_server_impl(py, directory)
 }
@@ -68,7 +69,7 @@ fn wait_for_jobs(
     py: Python,
     ctx: ClientContextPtr,
     job_ids: Vec<PyJobId>,
-    progress_callback: &PyAny,
+    progress_callback: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<PyJobId>> {
     wait_for_jobs_impl(py, ctx, job_ids, progress_callback)
 }
@@ -107,6 +108,7 @@ impl HqClusterContext {
 }
 
 #[pyfunction]
+#[pyo3(signature = (path))]
 fn cluster_start(_py: Python, path: Option<String>) -> PyResult<HqClusterContext> {
     let path: Option<PathBuf> = path.map(|p| p.into());
     let cluster = Cluster::start(path)?;
@@ -114,11 +116,11 @@ fn cluster_start(_py: Python, path: Option<String>) -> PyResult<HqClusterContext
 }
 
 #[pymodule]
-fn hyperqueue(_py: Python, m: &PyModule) -> PyResult<()> {
+fn hyperqueue(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Use a single-threaded Tokio runtime for all Rust async operations
     let mut builder = Builder::new_current_thread();
     builder.enable_all();
-    pyo3_asyncio::tokio::init(builder);
+    pyo3_async_runtimes::tokio::init(builder);
 
     // Common
     m.add_function(wrap_pyfunction!(get_hq_version, m)?)?;

@@ -3,19 +3,19 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tako::Map;
 
+use tako::WorkerId;
 use tako::gateway::LostWorkerReason;
 use tako::worker::WorkerConfiguration;
-use tako::WorkerId;
 
+use crate::JobId;
 use crate::common::manager::info::{GetManagerInfo, ManagerInfo};
-use crate::common::rpc::{initiate_request, make_rpc_queue, ResponseToken, RpcSender};
+use crate::common::rpc::{ResponseToken, RpcSender, initiate_request, make_rpc_queue};
 use crate::server::autoalloc::process::autoalloc_process;
 use crate::server::autoalloc::state::AutoAllocState;
 use crate::server::autoalloc::{Allocation, QueueId};
 use crate::server::event::streamer::EventStreamer;
 use crate::server::state::StateRef;
 use crate::transfer::messages::{AllocationQueueParams, QueueData};
-use crate::JobId;
 
 #[derive(Debug)]
 pub enum AutoAllocMessage {
@@ -84,7 +84,7 @@ impl AutoAllocService {
         self.send(AutoAllocMessage::JobCreated(job_id));
     }
 
-    pub fn get_queues(&self) -> impl Future<Output = Map<QueueId, QueueData>> {
+    pub fn get_queues(&self) -> impl Future<Output = Map<QueueId, QueueData>> + use<> {
         let fut = initiate_request(|token| self.sender.send(AutoAllocMessage::GetQueues(token)));
         async move { fut.await.unwrap() }
     }
@@ -94,7 +94,7 @@ impl AutoAllocService {
         server_dir: &Path,
         params: AllocationQueueParams,
         queue_id: Option<QueueId>,
-    ) -> impl Future<Output = anyhow::Result<QueueId>> {
+    ) -> impl Future<Output = anyhow::Result<QueueId>> + use<> {
         let fut = initiate_request(|token| {
             self.sender.send(AutoAllocMessage::AddQueue {
                 server_directory: server_dir.to_path_buf(),
@@ -109,7 +109,7 @@ impl AutoAllocService {
         &self,
         id: QueueId,
         force: bool,
-    ) -> impl Future<Output = anyhow::Result<()>> {
+    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
         let fut = initiate_request(|token| {
             self.sender.send(AutoAllocMessage::RemoveQueue {
                 id,
@@ -119,7 +119,7 @@ impl AutoAllocService {
         });
         async move { fut.await.unwrap() }
     }
-    pub fn pause_queue(&self, id: QueueId) -> impl Future<Output = anyhow::Result<()>> {
+    pub fn pause_queue(&self, id: QueueId) -> impl Future<Output = anyhow::Result<()>> + use<> {
         let fut = initiate_request(|token| {
             self.sender.send(AutoAllocMessage::PauseQueue {
                 id,
@@ -128,7 +128,7 @@ impl AutoAllocService {
         });
         async move { fut.await.unwrap() }
     }
-    pub fn resume_queue(&self, id: QueueId) -> impl Future<Output = anyhow::Result<()>> {
+    pub fn resume_queue(&self, id: QueueId) -> impl Future<Output = anyhow::Result<()>> + use<> {
         let fut = initiate_request(|token| {
             self.sender.send(AutoAllocMessage::ResumeQueue {
                 id,
@@ -141,7 +141,7 @@ impl AutoAllocService {
     pub fn get_allocations(
         &self,
         id: QueueId,
-    ) -> impl Future<Output = anyhow::Result<Vec<Allocation>>> {
+    ) -> impl Future<Output = anyhow::Result<Vec<Allocation>>> + use<> {
         let fut = initiate_request(|token| {
             self.sender
                 .send(AutoAllocMessage::GetAllocations(id, token))
@@ -168,9 +168,9 @@ pub fn create_autoalloc_service(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::common::rpc::{make_rpc_queue, RpcReceiver};
-    use crate::server::autoalloc::service::AutoAllocMessage;
+    use crate::common::rpc::{RpcReceiver, make_rpc_queue};
     use crate::server::autoalloc::AutoAllocService;
+    use crate::server::autoalloc::service::AutoAllocMessage;
 
     pub fn test_alloc_service() -> (AutoAllocService, RpcReceiver<AutoAllocMessage>) {
         let (tx, rx) = make_rpc_queue();

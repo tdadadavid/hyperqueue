@@ -4,7 +4,7 @@ use crate::common::error::HqError;
 use crate::common::serialization::SerializationConfig;
 use crate::stream::StreamSerializationConfig;
 use crate::transfer::stream::{ChannelId, StreamChunkHeader};
-use crate::worker::streamer::{StreamFileHeader, STREAM_FILE_HEADER, STREAM_FILE_SUFFIX};
+use crate::worker::streamer::{STREAM_FILE_HEADER, STREAM_FILE_SUFFIX, StreamFileHeader};
 use crate::{JobId, JobTaskId, Set};
 use bincode::Options;
 use chrono::{DateTime, Utc};
@@ -276,7 +276,7 @@ impl OutputLog {
             .get(&job_id)
             .ok_or_else(|| anyhow::format_err!("Job {job_id} not found"))?;
         Ok(match tasks {
-            Some(ref array) => {
+            Some(array) => {
                 let mut infos = Vec::new();
                 for task_id in array.iter() {
                     if let Some(task_info) = job.get(&JobTaskId::new(task_id)) {

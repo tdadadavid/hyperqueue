@@ -1,21 +1,21 @@
 use std::cmp::min;
 
 use chrono::Utc;
+use tako::ItemId;
 use tako::define_wrapped_type;
 use tako::gateway::{
     CancelTasks, FromGatewayMessage, LostWorkerMessage, NewWorkerMessage, TaskFailedMessage,
     TaskState, TaskUpdate, ToGatewayMessage,
 };
-use tako::ItemId;
 
+use crate::server::Senders;
 use crate::server::autoalloc::LostWorkerDetails;
 use crate::server::job::Job;
 use crate::server::restore::StateRestorer;
 use crate::server::worker::Worker;
-use crate::server::Senders;
 use crate::transfer::messages::ServerInfo;
-use crate::{unwrap_tako_id, WrappedRcRefCell};
 use crate::{JobId, Map, TakoTaskId, WorkerId};
+use crate::{WrappedRcRefCell, unwrap_tako_id};
 
 pub struct State {
     jobs: Map<JobId, Job>,
@@ -121,7 +121,7 @@ impl State {
         self.job_id_counter = id.as_num();
     }
 
-    pub fn last_n_ids(&self, n: u32) -> impl Iterator<Item = JobId> {
+    pub fn last_n_ids(&self, n: u32) -> impl Iterator<Item = JobId> + use<> {
         let n = min(n, self.job_id_counter - 1);
         ((self.job_id_counter - n)..self.job_id_counter).map(|id| id.into())
     }

@@ -1,9 +1,12 @@
+use crate::marshal::FromPy;
+use crate::utils::error::ToPyResult;
+use crate::{ClientContextPtr, FromPyObject, PyJobId, PyTaskId, borrow_mut, run_future};
 use hyperqueue::client::commands::submit::command::{
     DEFAULT_CRASH_LIMIT, DEFAULT_STDERR_PATH, DEFAULT_STDOUT_PATH,
 };
 use hyperqueue::client::output::resolve_task_paths;
 use hyperqueue::client::resources::parse_allocation_request;
-use hyperqueue::client::status::{is_terminated, Status};
+use hyperqueue::client::status::{Status, is_terminated};
 use hyperqueue::common::arraydef::IntArray;
 use hyperqueue::common::utils::fs::get_current_dir;
 use hyperqueue::server::job::JobTaskState;
@@ -14,20 +17,17 @@ use hyperqueue::transfer::messages::{
     TaskKind, TaskKindProgram, TaskSelector, TaskStatusSelector, TaskWithDependencies,
     ToClientMessage,
 };
-use hyperqueue::{rpc_call, tako, JobTaskCount, Set};
+use hyperqueue::{JobTaskCount, Set, rpc_call, tako};
 use pyo3::exceptions::PyException;
+use pyo3::prelude::PyAnyMethods;
 use pyo3::types::PyTuple;
-use pyo3::{IntoPy, PyAny, PyResult, Python};
+use pyo3::{Bound, IntoPyObject, PyAny, PyResult, Python};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tako::gateway::{ResourceRequestEntries, ResourceRequestEntry, ResourceRequestVariants};
 use tako::program::{FileOnCloseBehavior, ProgramDefinition, StdioDef};
 use tako::resources::{AllocationRequest, NumOfNodes, ResourceAmount};
-
-use crate::marshal::{FromPy, WrappedDuration};
-use crate::utils::error::ToPyResult;
-use crate::{borrow_mut, run_future, ClientContextPtr, FromPyObject, PyJobId, PyTaskId};
 
 #[derive(Debug, FromPyObject)]
 enum AllocationValue {
@@ -40,7 +40,7 @@ enum AllocationValue {
 pub struct ResourceRequestDescription {
     n_nodes: NumOfNodes,
     resources: HashMap<String, AllocationValue>,
-    min_time: Option<WrappedDuration>,
+    min_time: Option<Duration>,
 }
 
 #[derive(Debug, FromPyObject)]
@@ -204,7 +204,7 @@ fn build_task_desc(desc: TaskDescription, submit_dir: &Path) -> anyhow::Result<H
                                 })
                             })
                             .collect::<anyhow::Result<ResourceRequestEntries>>()?,
-                        min_time: rq.min_time.map(|v| v.into()).unwrap_or_default(),
+                        min_time: rq.min_time.unwrap_or_default(),
                     })
                 })
                 .collect::<anyhow::Result<_>>()?,
@@ -233,7 +233,7 @@ fn build_task_desc(desc: TaskDescription, submit_dir: &Path) -> anyhow::Result<H
     })
 }
 
-#[derive(dict_derive::IntoPyObject)]
+#[derive(IntoPyObject)]
 pub struct JobWaitStatus {
     finished: u64,
     failed: u64,
@@ -247,7 +247,7 @@ pub fn wait_for_jobs_impl(
     py: Python,
     ctx: ClientContextPtr,
     job_ids: Vec<PyJobId>,
-    callback: &PyAny,
+    callback: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<PyJobId>> {
     run_future(async move {
         let mut remaining_job_ids: Set<PyJobId> = job_ids.iter().copied().collect();
@@ -289,7 +289,7 @@ pub fn wait_for_jobs_impl(
                     (job.id.into(), status)
                 })
                 .collect();
-            let args = PyTuple::new(py, &[status.into_py(py)]);
+            let args = PyTuple::new(py, &[status.into_pyobject(py)?])?;
             callback.call1(args)?;
 
             if remaining_job_ids.is_empty() {
@@ -309,7 +309,7 @@ pub fn wait_for_jobs_impl(
     })
 }
 
-#[derive(dict_derive::IntoPyObject)]
+#[derive(IntoPyObject)]
 pub struct FailedTaskContext {
     stdout: Option<String>,
     stderr: Option<String>,

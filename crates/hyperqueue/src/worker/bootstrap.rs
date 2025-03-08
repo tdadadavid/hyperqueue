@@ -3,15 +3,15 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use signal_hook::consts::{SIGINT, SIGTERM, SIGTSTP};
 use signal_hook::iterator::Signals;
 use tako::Error as DsError;
 use tokio::net::lookup_host;
 use tokio::sync::Notify;
 
-use tako::worker::{run_worker, WorkerConfiguration};
 use tako::WorkerId;
+use tako::worker::{WorkerConfiguration, run_worker};
 
 use crate::common::manager::info::{ManagerInfo, ManagerType};
 use crate::common::manager::{pbs, slurm};
@@ -112,7 +112,7 @@ pub async fn initialize_worker(
     log::debug!("Starting Tako worker ...");
     let stop_flag = Arc::new(Notify::new());
     let ((worker_id, configuration), worker_future) = run_worker(
-        &server_addresses,
+        server_addresses,
         configuration,
         Some(record.worker.secret_key.clone()),
         |server_uid, worker_id| {

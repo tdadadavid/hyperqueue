@@ -6,23 +6,25 @@ use std::io;
 use std::io::IsTerminal;
 use std::panic::PanicHookInfo;
 
+use hyperqueue::HQ_VERSION;
 use hyperqueue::client::commands::autoalloc::command_autoalloc;
+use hyperqueue::client::commands::doc::command_doc;
 use hyperqueue::client::commands::job::{
-    cancel_job, close_job, forget_job, output_job_cat, output_job_detail, output_job_list,
-    output_job_summary, JobCancelOpts, JobCatOpts, JobCloseOpts, JobForgetOpts, JobInfoOpts,
-    JobListOpts, JobTaskIdsOpts,
+    JobCancelOpts, JobCatOpts, JobCloseOpts, JobForgetOpts, JobInfoOpts, JobListOpts,
+    JobTaskIdsOpts, cancel_job, close_job, forget_job, output_job_cat, output_job_detail,
+    output_job_list, output_job_summary,
 };
 use hyperqueue::client::commands::journal::command_journal;
 use hyperqueue::client::commands::outputlog::command_reader;
 use hyperqueue::client::commands::server::command_server;
-use hyperqueue::client::commands::submit::command::{open_job, SubmitJobConfOpts};
+use hyperqueue::client::commands::submit::command::{SubmitJobConfOpts, open_job};
 use hyperqueue::client::commands::submit::{
-    submit_computation, submit_computation_from_job_file, JobSubmitFileOpts, JobSubmitOpts,
+    JobSubmitFileOpts, JobSubmitOpts, submit_computation, submit_computation_from_job_file,
 };
 use hyperqueue::client::commands::wait::{wait_for_jobs, wait_for_jobs_with_progress};
 use hyperqueue::client::commands::worker::{
-    get_worker_info, get_worker_list, start_hq_worker, stop_worker, wait_for_workers, WorkerFilter,
-    WorkerStartOpts,
+    WorkerFilter, WorkerStartOpts, get_worker_info, get_worker_list, start_hq_worker, stop_worker,
+    wait_for_workers,
 };
 use hyperqueue::client::default_server_directory_path;
 use hyperqueue::client::globalsettings::GlobalSettings;
@@ -32,14 +34,14 @@ use hyperqueue::client::output::outputs::{Output, Outputs};
 use hyperqueue::client::output::quiet::Quiet;
 use hyperqueue::client::status::Status;
 use hyperqueue::client::task::{
-    output_job_task_ids, output_job_task_info, output_job_task_list, TaskCommand, TaskInfoOpts,
-    TaskListOpts, TaskOpts,
+    TaskCommand, TaskInfoOpts, TaskListOpts, TaskOpts, output_job_task_ids, output_job_task_info,
+    output_job_task_list,
 };
 use hyperqueue::common::cli::{
-    get_task_id_selector, get_task_selector, ColorPolicy, CommonOpts, GenerateCompletionOpts,
-    HwDetectOpts, JobCommand, JobOpts, JobProgressOpts, JobWaitOpts, OptsWithMatches, RootOptions,
-    SubCommand, WorkerAddressOpts, WorkerCommand, WorkerInfoOpts, WorkerListOpts, WorkerOpts,
-    WorkerStopOpts, WorkerWaitOpts,
+    ColorPolicy, CommonOpts, GenerateCompletionOpts, HwDetectOpts, JobCommand, JobOpts,
+    JobProgressOpts, JobWaitOpts, OptsWithMatches, RootOptions, SubCommand, WorkerAddressOpts,
+    WorkerCommand, WorkerInfoOpts, WorkerListOpts, WorkerOpts, WorkerStopOpts, WorkerWaitOpts,
+    get_task_id_selector, get_task_selector,
 };
 use hyperqueue::common::setup::setup_logging;
 use hyperqueue::common::utils::fs::absolute_path;
@@ -50,8 +52,7 @@ use hyperqueue::transfer::messages::{
 use hyperqueue::worker::hwdetect::{
     detect_additional_resources, detect_cpus, prune_hyper_threading,
 };
-use hyperqueue::HQ_VERSION;
-use tako::resources::{ResourceDescriptor, ResourceDescriptorItem, CPU_RESOURCE_NAME};
+use tako::resources::{CPU_RESOURCE_NAME, ResourceDescriptor, ResourceDescriptorItem};
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -299,8 +300,8 @@ async fn command_dashboard_start(
 ) -> anyhow::Result<()> {
     use hyperqueue::common::cli::DashboardCommand;
     use hyperqueue::dashboard::start_ui_loop;
-    use hyperqueue::server::event::journal::JournalReader;
     use hyperqueue::server::event::Event;
+    use hyperqueue::server::event::journal::JournalReader;
 
     match opts.subcmd.unwrap_or_default() {
         DashboardCommand::Replay { journal } => {
@@ -400,13 +401,19 @@ async fn main() -> hyperqueue::Result<()> {
 
     // Also enable backtraces by default.
     // This enables backtraces when panicking, but also for normal anyhow errors.
-    std::env::set_var("RUST_BACKTRACE", "full");
+    // SAFETY: we are at the beginning of the program, no other threads that could set
+    // environment variables should be executing.
+    unsafe {
+        std::env::set_var("RUST_BACKTRACE", "full");
+    }
 
     // This further disables backtraces for normal anyhow errors.
     // They should not be printed to users in release mode.
     #[cfg(not(debug_assertions))]
     {
-        std::env::set_var("RUST_LIB_BACKTRACE", "0");
+        unsafe {
+            std::env::set_var("RUST_LIB_BACKTRACE", "0");
+        }
     }
 
     let matches = RootOptions::command().get_matches();
@@ -494,6 +501,7 @@ async fn main() -> hyperqueue::Result<()> {
         SubCommand::AutoAlloc(opts) => command_autoalloc(&gsettings, opts).await,
         SubCommand::Journal(opts) => command_journal(&gsettings, opts).await,
         SubCommand::GenerateCompletion(opts) => generate_completion(opts),
+        SubCommand::Doc(opts) => command_doc(opts),
     };
 
     if let Err(e) = result {
