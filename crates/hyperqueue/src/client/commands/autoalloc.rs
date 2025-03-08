@@ -195,7 +195,6 @@ struct ResumeQueueOpts {
     queue_id: QueueId,
 }
 
-//TODO: David here is where to work on
 pub async fn command_autoalloc(
     gsettings: &GlobalSettings,
     opts: AutoAllocOpts,
