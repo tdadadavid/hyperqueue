@@ -206,7 +206,7 @@ pub async fn command_autoalloc(
             print_allocation_queues(gsettings, session).await?;
         }
         AutoAllocCommand::Add(opts) => {
-            add_queue(gsettings, session, opts).await?;
+            add_queue(session, opts).await?;
         }
         AutoAllocCommand::Info(opts) => {
             print_allocations(gsettings, session, opts).await?;
@@ -349,7 +349,6 @@ wasting resources."
 }
 
 async fn add_queue(
-    gsettings: &GlobalSettings,
     mut session: ClientSession,
     opts: AddQueueOpts,
 ) -> anyhow::Result<()> {
@@ -373,9 +372,6 @@ async fn add_queue(
         ToClientMessage::AutoAllocResponse(AutoAllocResponse::QueueCreated(id)) => id
     )
     .await?;
-
-    // print empty response
-    gsettings.printer().print_empty();
 
     if dry_run {
         log::info!(

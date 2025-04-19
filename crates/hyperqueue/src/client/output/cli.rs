@@ -1035,7 +1035,7 @@ impl Output for CliOutput {
         );
     }
 
-    fn print_empty(&self) {
+    fn finalize_output(&self) {
         println!()
     }
 }

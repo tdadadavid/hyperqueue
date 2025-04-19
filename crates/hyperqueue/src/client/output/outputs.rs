@@ -92,6 +92,6 @@ pub trait Output {
 
     fn print_error(&self, error: anyhow::Error);
 
-    // empty response
-    fn print_empty(&self);
+    // this will be called before hq quits
+    fn finalize_output(&self);
 }

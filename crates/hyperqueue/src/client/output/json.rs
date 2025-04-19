@@ -252,8 +252,8 @@ impl Output for JsonOutput {
         self.print(json!({ "error": format!("{error:?}") }))
     }
 
-    fn print_empty(&self) {
-        self.print(json!("{}"));
+    fn finalize_output(&self) {
+        self.print(json!({}));
     }
 }
 
