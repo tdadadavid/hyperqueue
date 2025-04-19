@@ -25,8 +25,7 @@ use crate::internal::server::reactor::{
 };
 use crate::internal::server::worker::Worker;
 use crate::internal::transfer::auth::{
-    do_authentication, forward_queue_to_sealed_sink, is_encryption_disabled, open_message,
-    serialize,
+    do_authentication, forward_queue_to_sealed_sink, open_message, serialize,
 };
 use crate::internal::transfer::transport::make_protocol_builder;
 use crate::internal::worker::configuration::sync_worker_configuration;
@@ -84,21 +83,16 @@ pub(crate) async fn worker_authentication(
 ) -> crate::Result<(ConnectionDescriptor, ConnectionRegistration)> {
     let (mut writer, mut reader) = make_protocol_builder().new_framed(stream).split();
 
-    let secret_key = core_ref.get().secret_key().clone();
-    let has_key = secret_key.is_some();
+    let secret_key = core_ref.get().secret_key().cloned();
     let (sealer, mut opener) = do_authentication(
         0,
         "server".to_string(),
         "worker".to_string(),
-        secret_key.clone(),
+        secret_key,
         &mut writer,
         &mut reader,
     )
     .await?;
-    if !is_encryption_disabled() {
-        assert_eq!(sealer.is_some(), has_key);
-    }
-
     let message_data = timeout(Duration::from_secs(15), reader.next())
         .await
         .map_err(|_| "Worker registration did not arrive")?
@@ -236,9 +230,10 @@ async fn worker_rpc_loop(
     };
 
     log::info!(
-        "Worker {} connection closed (connection: {})",
+        "Worker {} ({}) connection closed: {}",
         worker_id,
-        connection.address
+        connection.address,
+        reason
     );
     let mut core = core_ref.get_mut();
     let mut comm = comm_ref.get_mut();

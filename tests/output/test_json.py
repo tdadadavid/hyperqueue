@@ -53,6 +53,8 @@ def test_print_worker_info(hq_env: HqEnv):
             "allocation": None,
             "started": str,
             "ended": None,
+            "runtime_info": {"SingleNodeTasks": {"assigned_tasks": 0, "is_reserved": False, "running_tasks": 0}},
+            "last_task_started": None,
             "id": 1,
         }
     )
@@ -88,6 +90,7 @@ def test_print_server_record(hq_env: HqEnv):
             "server_uid": str,
             "start_date": str,
             "pid": int,
+            "journal_path": None,
         }
     )
     schema.validate(output)

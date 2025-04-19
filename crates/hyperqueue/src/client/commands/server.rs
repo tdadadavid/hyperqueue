@@ -19,7 +19,7 @@ use std::time::Duration;
 #[derive(Parser)]
 pub struct ServerOpts {
     #[clap(subcommand)]
-    subcmd: ServerCommand,
+    pub subcmd: ServerCommand,
 }
 
 #[derive(Parser)]
@@ -57,7 +57,7 @@ pub struct GenerateAccessOpts {
 }
 
 #[derive(Parser)]
-enum ServerCommand {
+pub enum ServerCommand {
     /// Start the HyperQueue server
     Start(ServerStartOpts),
     /// Stop the HyperQueue server, if it is running
@@ -69,7 +69,7 @@ enum ServerCommand {
 }
 
 #[derive(Parser)]
-struct ServerStartOpts {
+pub struct ServerStartOpts {
     /// Hostname/IP of the machine under which is visible to others, default: hostname
     #[arg(long)]
     host: Option<String>,
@@ -104,13 +104,25 @@ struct ServerStartOpts {
     /// Path to access file that is used for configuration of secret keys and ports
     #[arg(long)]
     access_file: Option<PathBuf>,
+
+    /// If set, client connection will NOT be AUTHENTICATED and ENCRYPTED.
+    /// ANYONE CAN CONNECT TO THE SERVER AS CLIENT!
+    /// USE AT YOUR OWN RISK.
+    #[arg(long)]
+    disable_client_authentication_and_encryption: bool,
+
+    /// If set, worker connection will NOT be AUTHENTICATED and ENCRYPTED.
+    /// ANYONE CAN CONNECT TO THE SERVER AS WORKER!
+    /// USE AT YOUR OWN RISK.
+    #[arg(long)]
+    disable_worker_authentication_and_encryption: bool,
 }
 
 #[derive(Parser)]
-struct ServerStopOpts {}
+pub struct ServerStopOpts {}
 
 #[derive(Parser)]
-struct ServerInfoOpts {}
+pub struct ServerInfoOpts {}
 
 pub async fn command_server(gsettings: &GlobalSettings, opts: ServerOpts) -> anyhow::Result<()> {
     match opts.subcmd {
@@ -153,8 +165,26 @@ async fn start_server(gsettings: &GlobalSettings, opts: ServerStartOpts) -> anyh
         worker_port,
         journal_path: opts.journal,
         journal_flush_period: opts.journal_flush_period,
-        worker_secret_key: access_file.as_ref().map(|a| a.worker_key().clone()),
-        client_secret_key: access_file.as_ref().map(|a| a.client_key().clone()),
+        worker_secret_key: access_file
+            .as_ref()
+            .map(|a| a.worker_key().cloned())
+            .unwrap_or_else(|| {
+                if opts.disable_worker_authentication_and_encryption {
+                    None
+                } else {
+                    Some(Arc::new(generate_key()))
+                }
+            }),
+        client_secret_key: access_file
+            .as_ref()
+            .map(|a| a.client_key().cloned())
+            .unwrap_or_else(|| {
+                if opts.disable_client_authentication_and_encryption {
+                    None
+                } else {
+                    Some(Arc::new(generate_key()))
+                }
+            }),
         server_uid: access_file.as_ref().map(|a| a.server_uid().to_string()),
     };
 
@@ -186,7 +216,7 @@ pub async fn print_server_info(gsettings: &GlobalSettings) -> anyhow::Result<()>
     gsettings
         .printer()
         // We are not using gsettings.server_directory() as it is local one
-        .print_server_description(None, &response);
+        .print_server_info(None, &response);
     Ok(())
 }
 
@@ -204,12 +234,12 @@ fn command_server_generate_access(
         ConnectAccessRecordPart {
             host: client_host,
             port: opts.client_port,
-            secret_key: client_key,
+            secret_key: Some(client_key),
         },
         ConnectAccessRecordPart {
             host: worker_host,
             port: opts.worker_port,
-            secret_key: worker_key,
+            secret_key: Some(worker_key),
         },
         server_uid,
     );

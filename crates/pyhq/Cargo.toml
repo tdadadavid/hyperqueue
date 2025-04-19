@@ -1,6 +1,6 @@
 [package]
 name = "pyhq"
-version = "0.21.0"
+version = "0.22.0"
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,10 +26,13 @@ anyhow = { workspace = true }
 log = { workspace = true }
 tempfile = { workspace = true }
 
-pyo3 = { version = "0.23", features = ["extension-module", "abi3", "abi3-py39", "anyhow", "serde"] }
-pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
-pythonize = "0.23"
+pyo3 = { version = "0.24", features = ["extension-module", "abi3", "abi3-py39", "anyhow", "serde"] }
+pyo3-async-runtimes = { version = "0.24", features = ["tokio-runtime"] }
+pythonize = "0.24"
 termcolor = "1.1"
 
 [package.metadata.maturin]
 python-source = "python"
+
+[lints]
+workspace = true

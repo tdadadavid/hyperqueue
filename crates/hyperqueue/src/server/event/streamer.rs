@@ -5,7 +5,7 @@ use crate::server::event::journal::{EventStreamMessage, EventStreamSender};
 use crate::server::event::payload::EventPayload;
 use crate::transfer::messages::{AllocationQueueParams, JobDescription, SubmitRequest};
 use crate::{JobId, JobTaskId, WorkerId};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use smallvec::SmallVec;
 use tako::gateway::LostWorkerReason;
 use tako::worker::{WorkerConfiguration, WorkerOverview};
@@ -33,20 +33,23 @@ impl EventStreamer {
     }
 
     pub fn on_worker_added(&self, id: WorkerId, configuration: WorkerConfiguration) {
-        self.send_event(EventPayload::WorkerConnected(id, Box::new(configuration)));
+        self.send_event(
+            EventPayload::WorkerConnected(id, Box::new(configuration)),
+            None,
+        );
     }
 
     pub fn on_worker_lost(&self, id: WorkerId, reason: LostWorkerReason) {
-        self.send_event(EventPayload::WorkerLost(id, reason));
+        self.send_event(EventPayload::WorkerLost(id, reason), None);
     }
 
     #[inline]
     pub fn on_overview_received(&self, worker_overview: WorkerOverview) {
-        self.send_event(EventPayload::WorkerOverviewReceived(worker_overview));
+        self.send_event(EventPayload::WorkerOverviewReceived(worker_overview), None);
     }
 
     pub fn on_job_opened(&self, job_id: JobId, job_desc: JobDescription) {
-        self.send_event(EventPayload::JobOpen(job_id, job_desc));
+        self.send_event(EventPayload::JobOpen(job_id, job_desc), None);
     }
 
     pub fn on_job_submitted(
@@ -61,17 +64,20 @@ impl EventStreamer {
                 return Ok(());
             }
         }
-        self.send_event(EventPayload::Submit {
-            job_id,
-            closed_job: submit_request.job_id.is_none(),
-            serialized_desc: Serialized::new(submit_request)?,
-        });
+        self.send_event(
+            EventPayload::Submit {
+                job_id,
+                closed_job: submit_request.job_id.is_none(),
+                serialized_desc: Serialized::new(submit_request)?,
+            },
+            None,
+        );
         Ok(())
     }
 
     #[inline]
-    pub fn on_job_completed(&self, job_id: JobId) {
-        self.send_event(EventPayload::JobCompleted(job_id));
+    pub fn on_job_completed(&self, job_id: JobId, now: DateTime<Utc>) {
+        self.send_event(EventPayload::JobCompleted(job_id), Some(now));
     }
 
     #[inline]
@@ -81,42 +87,55 @@ impl EventStreamer {
         task_id: JobTaskId,
         instance_id: InstanceId,
         worker_ids: SmallVec<[WorkerId; 1]>,
+        now: DateTime<Utc>,
     ) {
-        self.send_event(EventPayload::TaskStarted {
-            job_id,
-            task_id,
-            instance_id,
-            workers: worker_ids,
-        });
+        self.send_event(
+            EventPayload::TaskStarted {
+                job_id,
+                task_id,
+                instance_id,
+                workers: worker_ids,
+            },
+            Some(now),
+        );
     }
 
     #[inline]
-    pub fn on_task_finished(&self, job_id: JobId, task_id: JobTaskId) {
-        self.send_event(EventPayload::TaskFinished { job_id, task_id });
+    pub fn on_task_finished(&self, job_id: JobId, task_id: JobTaskId, now: DateTime<Utc>) {
+        self.send_event(EventPayload::TaskFinished { job_id, task_id }, Some(now));
     }
 
-    pub fn on_task_canceled(&self, job_id: JobId, task_id: JobTaskId) {
-        self.send_event(EventPayload::TaskCanceled { job_id, task_id });
+    pub fn on_task_canceled(&self, job_id: JobId, task_id: JobTaskId, now: DateTime<Utc>) {
+        self.send_event(EventPayload::TaskCanceled { job_id, task_id }, Some(now));
     }
 
     #[inline]
-    pub fn on_task_failed(&self, job_id: JobId, task_id: JobTaskId, error: String) {
-        self.send_event(EventPayload::TaskFailed {
-            job_id,
-            task_id,
-            error,
-        });
+    pub fn on_task_failed(
+        &self,
+        job_id: JobId,
+        task_id: JobTaskId,
+        error: String,
+        now: DateTime<Utc>,
+    ) {
+        self.send_event(
+            EventPayload::TaskFailed {
+                job_id,
+                task_id,
+                error,
+            },
+            Some(now),
+        );
     }
 
     pub fn on_allocation_queue_created(&self, id: QueueId, parameters: AllocationQueueParams) {
-        self.send_event(EventPayload::AllocationQueueCreated(
-            id,
-            Box::new(parameters),
-        ))
+        self.send_event(
+            EventPayload::AllocationQueueCreated(id, Box::new(parameters)),
+            None,
+        )
     }
 
     pub fn on_allocation_queue_removed(&self, id: QueueId) {
-        self.send_event(EventPayload::AllocationQueueRemoved(id))
+        self.send_event(EventPayload::AllocationQueueRemoved(id), None)
     }
 
     pub fn on_allocation_queued(
@@ -125,28 +144,41 @@ impl EventStreamer {
         allocation_id: AllocationId,
         worker_count: u64,
     ) {
-        self.send_event(EventPayload::AllocationQueued {
-            queue_id,
-            allocation_id,
-            worker_count,
-        })
+        self.send_event(
+            EventPayload::AllocationQueued {
+                queue_id,
+                allocation_id,
+                worker_count,
+            },
+            None,
+        )
     }
 
     pub fn on_allocation_started(&self, queue_id: QueueId, allocation_id: AllocationId) {
-        self.send_event(EventPayload::AllocationStarted(queue_id, allocation_id));
+        self.send_event(
+            EventPayload::AllocationStarted(queue_id, allocation_id),
+            None,
+        );
     }
 
     pub fn on_allocation_finished(&self, queue_id: QueueId, allocation_id: AllocationId) {
-        self.send_event(EventPayload::AllocationFinished(queue_id, allocation_id));
+        self.send_event(
+            EventPayload::AllocationFinished(queue_id, allocation_id),
+            None,
+        );
     }
 
-    fn send_event(&self, payload: EventPayload) {
+    pub fn is_journal_enabled(&self) -> bool {
+        self.inner.get().storage_sender.is_some()
+    }
+
+    fn send_event(&self, payload: EventPayload, now: Option<DateTime<Utc>>) {
         let mut inner = self.inner.get_mut();
         if inner.storage_sender.is_none() && inner.client_listeners.is_empty() {
             return;
         }
         let event = Event {
-            time: Utc::now(),
+            time: now.unwrap_or_else(Utc::now),
             payload,
         };
         inner
@@ -160,20 +192,31 @@ impl EventStreamer {
     }
 
     pub fn on_server_stop(&self) {
-        self.send_event(EventPayload::ServerStop);
+        self.send_event(EventPayload::ServerStop, None);
     }
 
     pub fn on_server_start(&self, server_uid: &str) {
-        self.send_event(EventPayload::ServerStart {
-            server_uid: server_uid.to_string(),
-        });
+        self.send_event(
+            EventPayload::ServerStart {
+                server_uid: server_uid.to_string(),
+            },
+            None,
+        );
     }
 
-    pub fn register_listener(
-        &self,
-        history_sender: mpsc::UnboundedSender<Event>,
-        current_sender: mpsc::UnboundedSender<Event>,
-    ) -> u32 {
+    pub fn start_journal_replay(&self, history_sender: mpsc::UnboundedSender<Event>) {
+        let inner = self.inner.get();
+        if let Some(ref streamer) = inner.storage_sender {
+            if streamer
+                .send(EventStreamMessage::ReplayJournal(history_sender))
+                .is_err()
+            {
+                log::error!("Event streaming queue has been closed.");
+            }
+        }
+    }
+
+    pub fn register_listener(&self, current_sender: mpsc::UnboundedSender<Event>) -> u32 {
         let mut inner = self.inner.get_mut();
         let listener_id = inner
             .client_listeners
@@ -183,14 +226,6 @@ impl EventStreamer {
             .unwrap_or(0)
             + 1;
         inner.client_listeners.push((current_sender, listener_id));
-        if let Some(ref streamer) = inner.storage_sender {
-            if streamer
-                .send(EventStreamMessage::RegisterListener(history_sender))
-                .is_err()
-            {
-                log::error!("Event streaming queue has been closed.");
-            }
-        }
         listener_id
     }
 

@@ -110,13 +110,36 @@ pub struct JobCompletionCallback {
     wait_for_close: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SubmittedJobDescription {
+    submitted_at: DateTime<Utc>,
+    description: Arc<JobSubmitDescription>,
+}
+
+impl SubmittedJobDescription {
+    pub fn at(time: DateTime<Utc>, description: JobSubmitDescription) -> Self {
+        Self {
+            submitted_at: time,
+            description: Arc::new(description),
+        }
+    }
+
+    pub fn submitted_at(&self) -> DateTime<Utc> {
+        self.submitted_at
+    }
+
+    pub fn description(&self) -> &JobSubmitDescription {
+        &self.description
+    }
+}
+
 pub struct Job {
     pub job_id: JobId,
     pub counters: JobTaskCounters,
     pub tasks: Map<JobTaskId, JobTaskInfo>,
 
     pub job_desc: JobDescription,
-    pub submit_descs: SmallVec<[Arc<JobSubmitDescription>; 1]>,
+    pub submit_descs: SmallVec<[SubmittedJobDescription; 1]>,
 
     // If true, new tasks may be submitted into this job
     // If true and all tasks in the job are terminated then the job
@@ -266,6 +289,7 @@ impl Job {
         task_id: JobTaskId,
         workers: SmallVec<[WorkerId; 1]>,
         context: SerializedTaskContext,
+        now: DateTime<Utc>,
     ) {
         let task = self.tasks.get_mut(&task_id).unwrap();
 
@@ -275,7 +299,7 @@ impl Job {
         if matches!(task.state, JobTaskState::Waiting) {
             task.state = JobTaskState::Running {
                 started_data: StartedTaskData {
-                    start_date: Utc::now(),
+                    start_date: now,
                     context,
                     worker_ids: workers,
                 },
@@ -304,7 +328,7 @@ impl Job {
                     handler.callback.send(self.job_id).ok();
                 }
                 self.completion_date = Some(now);
-                senders.events.on_job_completed(self.job_id);
+                senders.events.on_job_completed(self.job_id, now);
             }
         }
     }
@@ -314,7 +338,7 @@ impl Job {
         task_id: JobTaskId,
         now: DateTime<Utc>,
         senders: &Senders,
-    ) -> JobTaskId {
+    ) {
         let task = self.tasks.get_mut(&task_id).unwrap();
         match &task.state {
             JobTaskState::Running { started_data } => {
@@ -329,10 +353,9 @@ impl Job {
                 "Invalid worker state, expected Running, got {:?}",
                 task.state
             ),
-        }
-        senders.events.on_task_finished(self.job_id, task_id);
+        };
+        senders.events.on_task_finished(self.job_id, task_id, now);
         self.check_termination(senders, now);
-        task_id
     }
 
     pub fn set_waiting_state(&mut self, task_id: JobTaskId) {
@@ -374,7 +397,9 @@ impl Job {
         }
         self.counters.n_failed_tasks += 1;
 
-        senders.events.on_task_failed(self.job_id, task_id, error);
+        senders
+            .events
+            .on_task_failed(self.job_id, task_id, error, now);
         self.check_termination(senders, now);
         task_id
     }
@@ -399,7 +424,7 @@ impl Job {
             state => panic!("Invalid job state that is being canceled: {task_id:?} {state:?}"),
         }
 
-        senders.events.on_task_canceled(self.job_id, task_id);
+        senders.events.on_task_canceled(self.job_id, task_id, now);
         self.counters.n_canceled_tasks += 1;
         self.check_termination(senders, now);
         task_id
@@ -417,8 +442,8 @@ impl Job {
         rx
     }
 
-    pub fn attach_submit(&mut self, submit_desc: Arc<JobSubmitDescription>) {
-        match &submit_desc.task_desc {
+    pub fn attach_submit(&mut self, description: SubmittedJobDescription) {
+        match &description.description().task_desc {
             JobTaskDescription::Array { ids, .. } => {
                 self.tasks.reserve(ids.id_count() as usize);
                 ids.iter().for_each(|task_id| {
@@ -451,6 +476,6 @@ impl Job {
                 })
             }
         };
-        self.submit_descs.push(submit_desc);
+        self.submit_descs.push(description);
     }
 }

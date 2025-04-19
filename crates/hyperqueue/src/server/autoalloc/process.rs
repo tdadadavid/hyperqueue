@@ -1021,10 +1021,10 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
 
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use anyhow::anyhow;
+    use chrono::Utc;
     use derive_builder::Builder;
     use smallvec::smallvec;
     use tako::WorkerId;
@@ -1054,7 +1054,7 @@ mod tests {
         Allocation, AllocationId, AutoAllocResult, LostWorkerDetails, QueueId, QueueInfo,
     };
     use crate::server::event::streamer::EventStreamer;
-    use crate::server::job::Job;
+    use crate::server::job::{Job, SubmittedJobDescription};
     use crate::server::state::{State, StateRef};
     use crate::tests::utils::create_hq_state;
     use crate::transfer::messages::{
@@ -1175,7 +1175,7 @@ mod tests {
         let allocs = get_allocations(&state, queue_id);
 
         for id in [0u32, 1] {
-            on_worker_added(&s, queue_id, &mut state, &allocs[0].id, id.into());
+            on_worker_added(&s, queue_id, &mut state, &allocs[0].id, id);
         }
         check_running_workers(
             get_allocations(&state, queue_id).first().unwrap(),
@@ -1946,25 +1946,28 @@ mod tests {
             },
             false,
         );
-        job.attach_submit(Arc::new(JobSubmitDescription {
-            task_desc: JobTaskDescription::Array {
-                ids: IntArray::from_range(0, tasks),
-                entries: None,
-                task_desc: TaskDescription {
-                    kind: TaskKind::ExternalProgram(TaskKindProgram {
-                        program: def,
-                        pin_mode: PinMode::None,
-                        task_dir: false,
-                    }),
-                    resources,
-                    time_limit: None,
-                    priority: 0,
-                    crash_limit: 5,
+        job.attach_submit(SubmittedJobDescription::at(
+            Utc::now(),
+            JobSubmitDescription {
+                task_desc: JobTaskDescription::Array {
+                    ids: IntArray::from_range(0, tasks),
+                    entries: None,
+                    task_desc: TaskDescription {
+                        kind: TaskKind::ExternalProgram(TaskKindProgram {
+                            program: def,
+                            pin_mode: PinMode::None,
+                            task_dir: false,
+                        }),
+                        resources,
+                        time_limit: None,
+                        priority: 0,
+                        crash_limit: 5,
+                    },
                 },
+                submit_dir: Default::default(),
+                stream_path: None,
             },
-            submit_dir: Default::default(),
-            stream_path: None,
-        }));
+        ));
         job
     }
 
@@ -2079,12 +2082,12 @@ mod tests {
 
     fn fail_allocation(queue_id: QueueId, autoalloc: &mut AutoAllocState, allocation_id: &str) {
         let s = EventStreamer::new(None);
-        on_worker_added(&s, queue_id, autoalloc, &allocation_id, 0);
+        on_worker_added(&s, queue_id, autoalloc, allocation_id, 0);
         on_worker_lost(
             &s,
             queue_id,
             autoalloc,
-            &allocation_id,
+            allocation_id,
             0,
             lost_worker_quick(LostWorkerReason::ConnectionLost),
         );

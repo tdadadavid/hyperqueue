@@ -42,9 +42,11 @@ class TaskDescription:
     task_dir: bool
     priority: int
     resource_request: Sequence[ResourceRequest]
+    crash_limit: Optional[int]
 
 
 @dataclasses.dataclass
 class JobDescription:
+    name: Optional[str]
     tasks: List[TaskDescription]
     max_fails: Optional[int]

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize, Serializer};
+use std::fmt::Display;
 
 use crate::internal::common::error::DsError;
 use crate::internal::messages::common::TaskFailInfo;
@@ -128,7 +129,7 @@ pub struct TaskConfiguration {
 pub struct NewTasksMessage {
     pub tasks: Vec<TaskConfiguration>,
     pub shared_data: Vec<SharedTaskConfiguration>,
-    pub adjust_instance_id: Map<TaskId, InstanceId>,
+    pub adjust_instance_id_and_crash_counters: Map<TaskId, (InstanceId, u32)>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -183,8 +184,10 @@ pub enum FromGatewayMessage {
     CancelTasks(CancelTasks),
     GetTaskInfo(TaskInfoRequest),
     ServerInfo,
+    WorkerInfo(WorkerId),
     StopWorker(StopWorkerRequest),
     NewWorkerQuery(NewWorkerQuery),
+    TryReleaseMemory,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -241,6 +244,18 @@ pub struct ServerInfo {
     pub worker_listen_port: u16,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum WorkerRuntimeInfo {
+    SingleNodeTasks {
+        assigned_tasks: u32,
+        running_tasks: u32,
+        is_reserved: bool,
+    },
+    MultiNodeTask {
+        main_node: bool,
+    },
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TaskInfo {
     pub id: TaskId,
@@ -289,6 +304,18 @@ impl LostWorkerReason {
     }
 }
 
+impl Display for LostWorkerReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LostWorkerReason::Stopped => "stopped",
+            LostWorkerReason::ConnectionLost => "connection lost",
+            LostWorkerReason::HeartbeatLost => "heartbeat lost",
+            LostWorkerReason::IdleTimeout => "idle timeout",
+            LostWorkerReason::TimeLimitReached => "time limit reached",
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LostWorkerMessage {
     pub worker_id: WorkerId,
@@ -319,6 +346,7 @@ pub enum ToGatewayMessage {
     TaskInfo(TasksInfoResponse),
     Error(ErrorResponse),
     ServerInfo(ServerInfo),
+    WorkerInfo(Option<WorkerRuntimeInfo>),
     NewWorker(NewWorkerMessage),
     LostWorker(LostWorkerMessage),
     WorkerOverview(WorkerOverview),

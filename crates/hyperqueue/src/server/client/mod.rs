@@ -4,22 +4,22 @@ use std::sync::Arc;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use orion::kdf::SecretKey;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, mpsc};
-
 use tako::gateway::{CancelTasks, FromGatewayMessage, StopWorkerRequest, ToGatewayMessage};
 use tako::{Set, TaskGroup};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Notify, mpsc};
 
 use crate::client::status::{Status, job_status};
 use crate::common::serverdir::ServerDir;
 use crate::server::event::Event;
-use crate::server::job::JobTaskCounters;
+use crate::server::job::{JobTaskCounters, JobTaskState};
 use crate::server::state::{State, StateRef};
 use crate::transfer::connection::ServerConnection;
 use crate::transfer::messages::{
     CancelJobResponse, CloseJobResponse, FromClientMessage, IdSelector, JobDetail,
-    JobDetailResponse, JobInfoResponse, StopWorkerResponse, TaskSelector, ToClientMessage,
-    WorkerListResponse,
+    JobDetailResponse, JobInfoResponse, JobSubmitDescription, StopWorkerResponse, SubmitRequest,
+    TaskSelector, ToClientMessage, WorkerListResponse,
 };
 use crate::transfer::messages::{ForgetJobResponse, WaitForJobsResponse};
 use crate::{JobId, JobTaskCount, WorkerId, unwrap_tako_id};
@@ -28,8 +28,10 @@ pub mod autoalloc;
 mod submit;
 
 use crate::common::error::HqError;
+use crate::common::serialization::Serialized;
 use crate::server::Senders;
 use crate::server::client::submit::handle_open_job;
+use crate::server::event::payload::EventPayload;
 pub(crate) use submit::{submit_job_desc, validate_submit};
 
 pub async fn handle_client_connections(
@@ -38,7 +40,7 @@ pub async fn handle_client_connections(
     server_dir: ServerDir,
     listener: TcpListener,
     end_flag: Arc<Notify>,
-    key: Arc<SecretKey>,
+    key: Option<Arc<SecretKey>>,
 ) {
     let group = TaskGroup::default();
     while let Ok((connection, _)) = group.run_until(listener.accept()).await {
@@ -64,7 +66,7 @@ async fn handle_client(
     state_ref: StateRef,
     carrier: &Senders,
     end_flag: Arc<Notify>,
-    key: Arc<SecretKey>,
+    key: Option<Arc<SecretKey>>,
 ) -> crate::Result<()> {
     log::debug!("New client connection");
     let socket = ServerConnection::accept_client(socket, key).await?;
@@ -75,28 +77,41 @@ async fn handle_client(
     Ok(())
 }
 
+async fn stream_history_events<Tx: Sink<ToClientMessage, Error = HqError> + Unpin + 'static>(
+    tx: &mut Tx,
+    mut history: mpsc::UnboundedReceiver<Event>,
+) {
+    log::debug!("Resending history started");
+
+    let mut events = Vec::with_capacity(1024);
+    let capacity = events.capacity();
+    while history.recv_many(&mut events, capacity).await != 0 {
+        let events = std::mem::replace(&mut events, Vec::with_capacity(capacity));
+        if tx
+            .send_all(&mut futures::stream::iter(events).map(|e| Ok(ToClientMessage::Event(e))))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
 async fn stream_events<
     Tx: Sink<ToClientMessage, Error = HqError> + Unpin + 'static,
     Rx: Stream<Item = crate::Result<FromClientMessage>> + Unpin,
 >(
     tx: &mut Tx,
     rx: &mut Rx,
-    mut history: mpsc::UnboundedReceiver<Event>,
     mut current: mpsc::UnboundedReceiver<Event>,
 ) {
-    log::debug!("Resending history started");
-    while let Some(e) = history.recv().await {
-        if tx.send(ToClientMessage::Event(e)).await.is_err() {
-            return;
-        }
-    }
     log::debug!("History streaming completed");
     loop {
         let r = tokio::select! {
             r = current.recv() => r,
             _ = rx.next() => {
                 log::debug!("Event streaming terminated");
-                return
+                return;
             }
         };
         if let Some(e) = r {
@@ -137,7 +152,8 @@ pub async fn client_rpc_loop<
                     }
                     FromClientMessage::WorkerList => handle_worker_list(&state_ref).await,
                     FromClientMessage::WorkerInfo(msg) => {
-                        handle_worker_info(&state_ref, msg.worker_id).await
+                        handle_worker_info(&state_ref, senders, msg.worker_id, msg.runtime_info)
+                            .await
                     }
                     FromClientMessage::StopWorker(msg) => {
                         handle_worker_stop(&state_ref, senders, msg.selector).await
@@ -146,7 +162,7 @@ pub async fn client_rpc_loop<
                         handle_job_cancel(&state_ref, senders, &msg.selector).await
                     }
                     FromClientMessage::ForgetJob(msg) => {
-                        handle_job_forget(&state_ref, &msg.selector, msg.filter)
+                        handle_job_forget(&state_ref, senders, &msg.selector, msg.filter)
                     }
                     FromClientMessage::JobDetail(msg) => {
                         compute_job_detail(&state_ref, msg.job_id_selector, msg.task_selector)
@@ -164,18 +180,36 @@ pub async fn client_rpc_loop<
                     FromClientMessage::CloseJob(msg) => {
                         handle_job_close(&state_ref, senders, &msg.selector).await
                     }
-                    FromClientMessage::StreamEvents => {
+                    FromClientMessage::StreamEvents(msg) => {
                         log::debug!("Start streaming events to client");
                         /* We create two event queues, one for historic events and one for live events
                         So while historic events are loaded from the file and streamed, live events are already
-                        collected and sent immediately the historic events are sent */
+                        collected and sent immediately once the historic events are sent */
                         let (tx1, rx1) = mpsc::unbounded_channel::<Event>();
-                        let (tx2, rx2) = mpsc::unbounded_channel::<Event>();
-                        let listener_id = senders.events.register_listener(tx1, tx2);
+                        let live = if msg.live_events {
+                            let (tx2, rx2) = mpsc::unbounded_channel::<Event>();
+                            let listener_id = senders.events.register_listener(tx2);
+                            Some((rx2, listener_id))
+                        } else {
+                            None
+                        };
 
-                        stream_events(&mut tx, &mut rx, rx1, rx2).await;
+                        // If we use a journal, we can replay historical events from it.
+                        // If not, we can at least try to reconstruct a few basic events
+                        // based on the current state.
+                        if senders.events.is_journal_enabled() {
+                            senders.events.start_journal_replay(tx1);
+                        } else if let Err(e) = reconstruct_historical_events(state_ref, tx1) {
+                            log::error!("Cannot reconstruct historical state: {e:?}");
+                        }
 
-                        senders.events.unregister_listener(listener_id);
+                        stream_history_events(&mut tx, rx1).await;
+
+                        if let Some((rx2, listener_id)) = live {
+                            let _ = tx.send(ToClientMessage::EventLiveBoundary).await;
+                            stream_events(&mut tx, &mut rx, rx2).await;
+                            senders.events.unregister_listener(listener_id);
+                        }
                         break;
                     }
                     FromClientMessage::ServerInfo => {
@@ -210,6 +244,152 @@ pub async fn client_rpc_loop<
             }
         }
     }
+}
+
+/// Tries to reconstruct historical events based on the current state.
+fn reconstruct_historical_events(
+    state: StateRef,
+    event_sender: UnboundedSender<Event>,
+) -> anyhow::Result<()> {
+    let state = state.get();
+
+    // We buffer events in memory so that we can sort them by timestamp
+    let mut events = Vec::with_capacity(1024);
+
+    events.push(Event::at(
+        state.server_info().start_date,
+        EventPayload::ServerStart {
+            server_uid: state.server_info().server_uid.clone(),
+        },
+    ));
+
+    // Reconstruct worker connections
+    for (id, worker) in state.get_workers() {
+        events.push(Event::at(
+            worker.started_at(),
+            EventPayload::WorkerConnected(*id, Box::new(worker.configuration().clone())),
+        ));
+    }
+
+    // Reconstruct job submits
+    for job in state.jobs() {
+        events.push(Event::at(
+            job.submission_date,
+            EventPayload::JobOpen(job.job_id, job.job_desc.clone()),
+        ));
+        for submit in &job.submit_descs {
+            let submit_request = Serialized::new(&SubmitRequest {
+                job_desc: job.job_desc.clone(),
+                submit_desc: JobSubmitDescription {
+                    task_desc: submit.description().task_desc.clone(),
+                    submit_dir: submit.description().submit_dir.clone(),
+                    stream_path: submit.description().stream_path.clone(),
+                },
+                job_id: Some(job.job_id),
+            })?;
+            events.push(Event::at(
+                submit.submitted_at(),
+                EventPayload::Submit {
+                    job_id: job.job_id,
+                    closed_job: false,
+                    serialized_desc: submit_request,
+                },
+            ));
+        }
+
+        for (id, task) in &job.tasks {
+            // Task start
+            let started_data = match &task.state {
+                JobTaskState::Running { started_data }
+                | JobTaskState::Finished { started_data, .. }
+                | JobTaskState::Failed {
+                    started_data: Some(started_data),
+                    ..
+                }
+                | JobTaskState::Canceled {
+                    started_data: Some(started_data),
+                    ..
+                } => Some(started_data.clone()),
+                JobTaskState::Waiting
+                | JobTaskState::Failed { .. }
+                | JobTaskState::Canceled { .. } => None,
+            };
+            if let Some(started_data) = started_data {
+                events.push(Event::at(
+                    started_data.start_date,
+                    EventPayload::TaskStarted {
+                        job_id: job.job_id,
+                        task_id: *id,
+                        instance_id: started_data.context.instance_id,
+                        workers: started_data.worker_ids.clone(),
+                    },
+                ));
+            }
+
+            // Task end
+
+            match &task.state {
+                JobTaskState::Finished { end_date, .. } => {
+                    events.push(Event::at(
+                        *end_date,
+                        EventPayload::TaskFinished {
+                            job_id: job.job_id,
+                            task_id: *id,
+                        },
+                    ));
+                }
+                JobTaskState::Failed {
+                    end_date, error, ..
+                } => {
+                    events.push(Event::at(
+                        *end_date,
+                        EventPayload::TaskFailed {
+                            job_id: job.job_id,
+                            task_id: *id,
+                            error: error.clone(),
+                        },
+                    ));
+                }
+                JobTaskState::Canceled { cancelled_date, .. } => {
+                    events.push(Event::at(
+                        *cancelled_date,
+                        EventPayload::TaskCanceled {
+                            job_id: job.job_id,
+                            task_id: *id,
+                        },
+                    ));
+                }
+                JobTaskState::Waiting | JobTaskState::Running { .. } => {}
+            };
+        }
+
+        // Job end
+        if let Some(completion_date) = job.completion_date {
+            events.push(Event::at(
+                completion_date,
+                EventPayload::JobCompleted(job.job_id),
+            ));
+        }
+    }
+
+    // Reconstruct worker disconnections
+    // In theory, if a worker disconnect event had the same timestamp as something else,
+    // keep the worker disconnection after that after event
+    for (id, worker) in state.get_workers() {
+        if let Some(ended) = worker.make_info(None).ended {
+            events.push(Event::at(
+                ended.ended_at,
+                EventPayload::WorkerLost(*id, ended.reason),
+            ));
+        }
+    }
+
+    // Use a stable sort to keep relative ordering between events the same
+    events.sort_by_key(|e| e.time);
+    for event in events {
+        event_sender.send(event)?;
+    }
+    Ok(())
 }
 
 async fn handle_prune_journal(state_ref: &StateRef, senders: &Senders) -> ToClientMessage {
@@ -317,7 +497,7 @@ async fn handle_worker_stop(
             .get()
             .get_workers()
             .iter()
-            .filter(|(_, worker)| worker.make_info().ended.is_none())
+            .filter(|(_, worker)| worker.make_info(None).ended.is_none())
             .map(|(_, worker)| worker.worker_id())
             .collect(),
         IdSelector::LastN(n) => {
@@ -330,7 +510,7 @@ async fn handle_worker_stop(
 
     for worker_id in worker_ids {
         if let Some(worker) = state_ref.get().get_worker(worker_id) {
-            if worker.make_info().ended.is_some() {
+            if worker.make_info(None).ended.is_some() {
                 responses.push((worker_id, StopWorkerResponse::AlreadyStopped));
                 continue;
             }
@@ -420,7 +600,7 @@ fn compute_job_info(state_ref: &StateRef, selector: &IdSelector) -> ToClientMess
 
 async fn handle_job_cancel(
     state_ref: &StateRef,
-    carrier: &Senders,
+    senders: &Senders,
     selector: &IdSelector,
 ) -> ToClientMessage {
     let job_ids: Vec<JobId> = match selector {
@@ -437,7 +617,7 @@ async fn handle_job_cancel(
 
     let mut responses: Vec<(JobId, CancelJobResponse)> = Vec::new();
     for job_id in job_ids {
-        let response = cancel_job(state_ref, carrier, job_id).await;
+        let response = cancel_job(state_ref, senders, job_id).await;
         responses.push((job_id, response));
     }
 
@@ -534,6 +714,7 @@ async fn cancel_job(state_ref: &StateRef, senders: &Senders, job_id: JobId) -> C
 
 fn handle_job_forget(
     state_ref: &StateRef,
+    senders: &Senders,
     selector: &IdSelector,
     allowed_statuses: Vec<Status>,
 ) -> ToClientMessage {
@@ -553,6 +734,11 @@ fn handle_job_forget(
             forgotten += 1;
         }
     }
+    state.try_release_memory();
+    senders
+        .backend
+        .send_tako_message_no_wait(FromGatewayMessage::TryReleaseMemory);
+
     let ignored = job_ids.len() - forgotten;
 
     ToClientMessage::ForgetJobResponse(ForgetJobResponse { forgotten, ignored })
@@ -565,13 +751,39 @@ async fn handle_worker_list(state_ref: &StateRef) -> ToClientMessage {
         workers: state
             .get_workers()
             .values()
-            .map(|w| w.make_info())
+            .map(|w| w.make_info(None))
             .collect(),
     })
 }
 
-async fn handle_worker_info(state_ref: &StateRef, worker_id: WorkerId) -> ToClientMessage {
+async fn handle_worker_info(
+    state_ref: &StateRef,
+    senders: &Senders,
+    worker_id: WorkerId,
+    runtime_info: bool,
+) -> ToClientMessage {
+    let runtime_info = if runtime_info
+        && state_ref
+            .get()
+            .get_workers()
+            .get(&worker_id)
+            .is_some_and(|w| w.is_running())
+    {
+        match senders
+            .backend
+            .send_tako_message(FromGatewayMessage::WorkerInfo(worker_id))
+            .await
+        {
+            Ok(ToGatewayMessage::WorkerInfo(info)) => info,
+            _ => unreachable!(),
+        }
+    } else {
+        None
+    };
     let state = state_ref.get();
-
-    ToClientMessage::WorkerInfoResponse(state.get_worker(worker_id).map(|w| w.make_info()))
+    ToClientMessage::WorkerInfoResponse(
+        state
+            .get_worker(worker_id)
+            .map(|w| w.make_info(runtime_info)),
+    )
 }

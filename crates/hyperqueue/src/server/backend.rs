@@ -46,11 +46,15 @@ impl Backend {
         Ok(rx.await.unwrap())
     }
 
+    pub fn send_tako_message_no_wait(&self, message: FromGatewayMessage) {
+        let _ = self.inner.get_mut().tako_sender.send(message);
+    }
+
     pub async fn start(
         state_ref: StateRef,
         events: EventStreamer,
         autoalloc: AutoAllocService,
-        key: Arc<SecretKey>,
+        key: Option<Arc<SecretKey>>,
         idle_timeout: Option<Duration>,
         worker_port: Option<u16>,
         worker_id_initial_value: WorkerId,
@@ -63,7 +67,7 @@ impl Backend {
         let server_uid = state_ref.get().server_info().server_uid.clone();
         let (server_ref, server_future) = tako::server::server_start(
             SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), worker_port.unwrap_or(0)),
-            Some(key),
+            key,
             msd,
             from_tako_sender.clone(),
             false,
@@ -115,7 +119,8 @@ impl Backend {
                         | ToGatewayMessage::Error(_)
                         | ToGatewayMessage::ServerInfo(_)
                         | ToGatewayMessage::WorkerStopped
-                        | ToGatewayMessage::NewWorkerAllocationQueryResponse(_) => {
+                        | ToGatewayMessage::NewWorkerAllocationQueryResponse(_)
+                        | ToGatewayMessage::WorkerInfo(_) => {
                             let response = senders
                                 .backend
                                 .inner

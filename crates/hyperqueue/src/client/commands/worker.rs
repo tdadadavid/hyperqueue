@@ -1,9 +1,10 @@
 use crate::client::commands::duration_doc;
-use anyhow::bail;
+use anyhow::{Context, bail};
 use chrono::Utc;
-use std::path::PathBuf;
+use std::fmt::{Display, Formatter};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
-
 use tako::resources::{
     CPU_RESOURCE_NAME, ResourceDescriptor, ResourceDescriptorItem, ResourceDescriptorKind,
 };
@@ -14,12 +15,17 @@ use clap::Parser;
 use tako::hwstats::GpuFamily;
 use tako::internal::worker::configuration::OverviewConfiguration;
 use tempfile::TempDir;
+use tokio::process::{Child, Command};
+use tokio::signal::ctrl_c;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 use crate::WorkerId;
 use crate::client::globalsettings::GlobalSettings;
 use crate::client::utils::{PassThroughArgument, passthrough_parser};
+use crate::common::cli::DeploySshOpts;
 use crate::common::manager::info::{ManagerInfo, WORKER_EXTRA_MANAGER_KEY};
+use crate::common::utils::fs::get_hq_binary_path;
 use crate::common::utils::network::get_hostname;
 use crate::common::utils::time::parse_hms_or_human_time;
 use crate::common::utils::time::parse_human_time;
@@ -165,6 +171,8 @@ pub async fn start_hq_worker(
         configuration: worker.configuration.clone(),
         started: Utc::now(),
         ended: None,
+        runtime_info: None,
+        last_task_started: None,
     });
     worker.run().await?;
     log::info!("Worker stopping");
@@ -352,11 +360,13 @@ pub async fn get_worker_list(
 pub async fn get_worker_info(
     session: &mut ClientSession,
     worker_id: WorkerId,
+    runtime_info: bool,
 ) -> crate::Result<Option<WorkerInfo>> {
     let msg = rpc_call!(
         session.connection(),
         FromClientMessage::WorkerInfo(WorkerInfoRequest {
             worker_id,
+            runtime_info,
         }),
         ToClientMessage::WorkerInfoResponse(r) => r
     )
@@ -375,7 +385,7 @@ pub async fn stop_worker(session: &mut ClientSession, selector: IdSelector) -> c
     for (id, response) in responses {
         match response {
             StopWorkerResponse::Failed(e) => {
-                log::error!("Stopping worker {} failed; {}", id, e.to_string());
+                log::error!("Stopping worker {} failed; {}", id, e);
             }
             StopWorkerResponse::InvalidWorker => {
                 log::error!("Stopping worker {} failed; worker not found", id);
@@ -423,4 +433,167 @@ pub async fn wait_for_workers(
         sleep(Duration::from_secs(1)).await;
     }
     Ok(())
+}
+
+pub async fn deploy_ssh_workers(opts: DeploySshOpts) -> anyhow::Result<()> {
+    // We need to validate worker start options, but also get them as a list of arguments,
+    // so that we can forward it to the SSH command.
+    // We do that by using trailing var args, and then parse them manually as `WorkerStartOpts`
+    // here.
+    // We need to include a first argument so that `parse_from` works.
+    // The name of the argument is chosen so that it renders well in `--help`.
+    let mut fake_worker_args = vec!["hq worker deploy-ssh --".to_string()];
+    fake_worker_args.extend(opts.worker_start_args.clone());
+
+    // This actually crashes the program if the arguments are wrong.
+    // It is not ideal, but if we returned Err, then the error message would not be as nice.
+    let _worker_args = WorkerStartOpts::parse_from(fake_worker_args);
+
+    let hostnames = load_hostnames(&opts.hostfile)?;
+    if hostnames.is_empty() {
+        return Err(anyhow::anyhow!("The provided hostname is empty"));
+    }
+
+    let ssh = get_ssh_binary()?;
+
+    let binary = get_hq_binary_path()?;
+    let mut args = vec![
+        binary.to_str().unwrap().to_string(),
+        "worker".to_string(),
+        "start".to_string(),
+    ];
+    args.extend(opts.worker_start_args);
+
+    let mut worker_futures = JoinSet::new();
+    let mut worker_data = Map::new();
+
+    // Start the workers on all nodes in the hostfile
+    for hostname in hostnames {
+        let mut child = start_ssh_worker_process(&ssh, &hostname, &args, opts.show_output)?;
+        let handle = worker_futures.spawn(async move {
+            let status = child.wait().await?;
+            if !status.success() {
+                Err(anyhow::anyhow!(
+                    "Worker exited with code {}",
+                    status.code().unwrap_or(-1)
+                ))
+            } else {
+                Ok(())
+            }
+        });
+        worker_data.insert(handle.id(), hostname);
+    }
+
+    let mut interrupt = std::pin::pin!(ctrl_c());
+    let mut has_error = false;
+    loop {
+        tokio::select! {
+            _ = &mut interrupt => {
+                eprintln!("SIGINT received, closing workers");
+                break;
+            }
+            result = worker_futures.join_next_with_id() => {
+                let result = result.unwrap()?;
+                let (id, result) = result;
+                let hostname = &worker_data[&id];
+                match result {
+                    Ok(_) => {
+                        log::info!("Worker at `{hostname}` has ended successfully");
+                    }
+                    Err(error) => {
+                        log::error!("Worker at `{hostname}` has ended with an error: {error:?}");
+                        has_error = true;
+                    }
+                }
+                if worker_futures.is_empty() {
+                    log::info!("All workers have finished");
+                    break;
+                }
+            }
+        }
+    }
+    worker_futures.shutdown().await;
+
+    if has_error {
+        Err(anyhow::anyhow!("Some workers have ended with an error"))
+    } else {
+        Ok(())
+    }
+}
+
+fn start_ssh_worker_process(
+    ssh: &Path,
+    hostname: &Hostname,
+    args: &[String],
+    show_output: bool,
+) -> anyhow::Result<Child> {
+    let mut cmd = Command::new(ssh);
+    let cmd = cmd
+        .arg(&hostname.host)
+        // double -t forces TTY allocation and propagates SIGINT to the remote process
+        .arg("-t")
+        .arg("-t");
+    if let Some(port) = hostname.port {
+        cmd.arg("-p");
+        cmd.arg(port.to_string());
+    }
+
+    cmd.arg("--")
+        .args(args)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    if !show_output {
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+    }
+
+    let child = cmd
+        .spawn()
+        .with_context(|| anyhow::anyhow!("Cannot start SSH command {cmd:?}"))?;
+    log::info!("Started worker process at `{hostname}`");
+    Ok(child)
+}
+
+struct Hostname {
+    host: String,
+    port: Option<u16>,
+}
+
+impl Display for Hostname {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.host)?;
+        if let Some(port) = self.port {
+            write!(f, ":{port}")?;
+        }
+        Ok(())
+    }
+}
+
+fn load_hostnames(hostfile: &Path) -> anyhow::Result<Vec<Hostname>> {
+    let content = std::fs::read_to_string(hostfile)
+        .with_context(|| anyhow::anyhow!("Cannot load hostfile from {}", hostfile.display()))?;
+    content
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            if let Some((host, port)) = line.split_once(':') {
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|e| anyhow::anyhow!("Cannot parse port from {line}: {e:?}"))?;
+                Ok(Hostname {
+                    host: host.to_string(),
+                    port: Some(port),
+                })
+            } else {
+                Ok(Hostname {
+                    host: line.to_string(),
+                    port: None,
+                })
+            }
+        })
+        .collect()
+}
+
+fn get_ssh_binary() -> anyhow::Result<PathBuf> {
+    which::which("ssh").context("Cannot find `ssh` binary. Make sure that OpenSSH is installed.")
 }

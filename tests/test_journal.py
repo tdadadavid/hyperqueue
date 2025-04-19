@@ -6,7 +6,7 @@ from .autoalloc.mock.mock import MockJobManager
 from .autoalloc.flavor import all_flavors, ManagerFlavor
 from .autoalloc.utils import add_queue, remove_queue
 from .conftest import HqEnv
-from .utils import wait_for_job_state
+from .utils import wait_for_job_state, wait_for_task_state
 import os
 
 
@@ -342,3 +342,86 @@ def test_flush_and_prune_journal(hq_env: HqEnv, tmp_path):
     j_ids, w_ids = collect_ids()
     assert j_ids == {1, 3}
     assert w_ids == {2}
+
+
+def test_restore_dependencies1(hq_env: HqEnv, tmp_path):
+    journal_path = os.path.join(tmp_path, "my.journal")
+    hq_env.start_server(args=["--journal", journal_path])
+    hq_env.start_worker()
+    tmp_path.joinpath("sleep_time").write_text("100")
+    tmp_path.joinpath("job.toml").write_text(
+        """
+[[task]]
+id = 1
+command = ["touch", "a"]
+
+[[task]]
+id = 2
+command = ["bash", "-c", "sleep `cat sleep_time` && touch b"]
+
+[[task]]
+id = 3
+command = ["touch", "c"]
+deps = [1, 2]
+    """
+    )
+    hq_env.command(["job", "submit-file", "job.toml"])
+    wait_for_task_state(hq_env, 1, [1, 2, 3], ["finished", "running", "waiting"])
+    hq_env.stop_server()
+    assert os.path.isfile("a")
+    assert not os.path.isfile("b")
+    assert not os.path.isfile("c")
+    os.unlink("a")
+
+    tmp_path.joinpath("sleep_time").write_text("0")
+
+    hq_env.start_server(args=["--journal", journal_path])
+    hq_env.start_worker()
+    wait_for_job_state(hq_env, 1, "FINISHED")
+
+    assert not os.path.isfile("a")
+    assert os.path.isfile("b")
+    assert os.path.isfile("c")
+
+
+def test_restore_dependencies2(hq_env: HqEnv, tmp_path):
+    journal_path = os.path.join(tmp_path, "my.journal")
+    hq_env.start_server(args=["--journal", journal_path])
+    hq_env.start_worker()
+    tmp_path.joinpath("job.toml").write_text(
+        """
+[[task]]
+id = 1
+command = ["sleep", "0"]
+
+[[task]]
+id = 2
+command = ["sleep", "0"]
+deps = [1]
+[[task.request]]
+resources = { "cpus" = "1", "x"=1 }
+    """
+    )
+    hq_env.command(["job", "submit-file", "job.toml"])
+    wait_for_task_state(hq_env, 1, [1, 2], ["finished", "waiting"])
+    hq_env.stop_server()
+
+    hq_env.start_server(args=["--journal", journal_path])
+    hq_env.start_worker(args=["--resource", "x=sum(2)"])
+    wait_for_job_state(hq_env, 1, "FINISHED")
+
+
+def test_restore_crash_counters(hq_env: HqEnv, tmp_path):
+    journal_path = os.path.join(tmp_path, "my.journal")
+    hq_env.start_server(args=["--journal", journal_path])
+    hq_env.start_worker()
+    hq_env.command(["submit", "--crash-limit=2", "--", "sleep", "4"])
+    wait_for_job_state(hq_env, 1, "RUNNING")
+    hq_env.kill_worker(1)
+    wait_for_job_state(hq_env, 1, "WAITING")
+    hq_env.stop_server()
+    hq_env.start_server(args=["--journal", journal_path])
+    hq_env.start_worker()
+    wait_for_job_state(hq_env, 1, "RUNNING")
+    hq_env.kill_worker(3)
+    wait_for_job_state(hq_env, 1, "FAILED")

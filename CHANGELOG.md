@@ -1,11 +1,36 @@
-## Dev
+## DEV
 
 ### New features
 
+* `hq worker info` contains more information
+* `hq job forget` tries to free more memory
+* You can now configure Job name in the Python API.
+* `hq job progress` now displays all jobs and tasks that you wait for, rather than those that were unfinished at the time when the command was executed.
+
+### Fixes
+
+* Fixed a problem with journal loading when task dependencies are used
+* Fixed restoring crash counters and instance ids from journal
+
+## 0.22.0
+
+### New features
+
+* Added `hq worker deploy-ssh` to deploy workers to a set of nodes using SSH.
 * Added `hq doc` command for accessing documentation about various HQ features from the command-line.
+* `hq journal replay` added. It similar to `hq journal stream` but it will not wait for new events.
+* More robust initialization of dashboard
+* Authentication and encryption of client/worker connection can be disabled. It is mostly for testing
+  and benchmarking purpose. Do not use if you are not in 100% safe environment.
 
 ### Breaking change
+
 * The Python API now requires Python 3.9, up from Python 3.6.
+
+### Fixes
+
+* Fixes #848, inefficient scheduling of tasks with priorities
+* HyperQueue will no longer allocate extreme amounts of memory when loading a corrupted journal
 
 ## v0.21.1
 
@@ -16,7 +41,10 @@
 ## v0.21.0
 
 ### Breaking change
-* Pre-built HyperQueue releases available from our GitHub repository are now built with GLIBC `2.28`, instead of `2.17`. If you need to run HyperQueue on a system with an older GLIBC version, you might need to recompile it from source on your system. If you encounter any issues, please let us know.
+
+* Pre-built HyperQueue releases available from our GitHub repository are now built with GLIBC `2.28`, instead of `2.17`.
+  If you need to run HyperQueue on a system with an older GLIBC version, you might need to recompile it from source on
+  your system. If you encounter any issues, please let us know.
 
 ### Changes
 

@@ -29,7 +29,9 @@ class ProgramMock:
 
     @contextlib.contextmanager
     def mock_program_with_code(self, name: str, code: str):
-        content = f"#!{sys.executable}\n{code}"
+        import textwrap
+
+        content = f"#!{sys.executable}\n{textwrap.dedent(code)}"
         program_path = self.directory / name
         assert not program_path.is_file()
 
@@ -37,6 +39,6 @@ class ProgramMock:
             f.write(content)
         os.chmod(program_path, 0o700)
 
-        yield
+        yield program_path
 
         os.unlink(program_path)

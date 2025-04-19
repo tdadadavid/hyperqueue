@@ -143,7 +143,7 @@ fn test_submit_jobs() {
 
     let t1 = task(501);
     let t2 = task_with_deps(502, &[&t1], 1);
-    on_new_tasks(&mut core, &mut comm, vec![t2, t1]);
+    on_new_tasks(&mut core, &mut comm, vec![t1, t2]);
 
     comm.check_need_scheduling();
     comm.emptiness_check();
@@ -160,7 +160,7 @@ fn test_submit_jobs() {
     let t5 = task_with_deps(603, &[&t3], 1);
     let t6 = task_with_deps(601, &[&t3, &t4, &t5, t2], 1);
 
-    on_new_tasks(&mut core, &mut comm, vec![t6, t3, t4, t5]);
+    on_new_tasks(&mut core, &mut comm, vec![t3, t4, t5, t6]);
     comm.check_need_scheduling();
     comm.emptiness_check();
 
@@ -278,7 +278,7 @@ fn test_assignments_and_finish() {
         TaskFinishedMsg { id: 12.into() },
     );
 
-    assert!(core.get_task(12.into()).is_finished());
+    assert!(core.find_task(12.into()).is_none());
     check_worker_tasks_exact(&core, 100, &[id1]);
     check_worker_tasks_exact(&core, 101, &[]);
     check_worker_tasks_exact(&core, 102, &[]);
@@ -286,8 +286,6 @@ fn test_assignments_and_finish() {
     comm.check_need_scheduling();
     assert_eq!(comm.take_client_task_finished(1)[0], TaskId::new(12));
     comm.emptiness_check();
-
-    assert!(core.find_task(12.into()).is_some());
 
     on_task_finished(
         &mut core,

@@ -111,6 +111,13 @@ impl State {
         Some(job)
     }
 
+    /// Try to release unused memory if possible.
+    /// Can be called e.g. after forgetting jobs.
+    pub fn try_release_memory(&mut self) {
+        self.jobs.shrink_to_fit();
+        self.workers.shrink_to_fit();
+    }
+
     pub fn new_job_id(&mut self) -> JobId {
         let id = self.job_id_counter;
         self.job_id_counter += 1;
@@ -177,10 +184,20 @@ impl State {
             } => {
                 let (job_id, task_id) = unwrap_tako_id(msg.id);
                 let job = self.get_job_mut(job_id).unwrap();
-                job.set_running_state(task_id, worker_ids.clone(), context);
-                senders
-                    .events
-                    .on_task_started(job_id, task_id, instance_id, worker_ids.clone());
+                let now = Utc::now();
+                job.set_running_state(task_id, worker_ids.clone(), context, now);
+                for worker_id in &worker_ids {
+                    if let Some(worker) = self.workers.get_mut(worker_id) {
+                        worker.update_task_started(job_id, task_id, now);
+                    }
+                }
+                senders.events.on_task_started(
+                    job_id,
+                    task_id,
+                    instance_id,
+                    worker_ids.clone(),
+                    now,
+                );
             }
             TaskState::Finished => {
                 let now = Utc::now();

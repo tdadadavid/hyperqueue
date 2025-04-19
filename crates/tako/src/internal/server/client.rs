@@ -91,7 +91,7 @@ pub(crate) async fn process_client_message(
                             TaskRuntimeState::Stealing(_, _) => TaskState::Waiting,
                             TaskRuntimeState::Running { .. } => TaskState::Waiting,
                             TaskRuntimeState::RunningMultiNode(_) => TaskState::Waiting,
-                            TaskRuntimeState::Finished(_) => TaskState::Finished,
+                            TaskRuntimeState::Finished => TaskState::Finished,
                         },
                     }
                 })
@@ -158,6 +158,24 @@ pub(crate) async fn process_client_message(
             );
             None
         }
+        FromGatewayMessage::TryReleaseMemory => {
+            let mut core = core_ref.get_mut();
+            core.try_release_memory();
+            None
+        }
+        FromGatewayMessage::WorkerInfo(worker_id) => {
+            let core = core_ref.get();
+            let response = core
+                .get_worker_map()
+                .get(&worker_id)
+                .map(|w| w.worker_info(core.task_map()));
+            assert!(
+                client_sender
+                    .send(ToGatewayMessage::WorkerInfo(response))
+                    .is_ok()
+            );
+            None
+        }
     }
 }
 
@@ -200,10 +218,13 @@ fn handle_new_tasks(
         let task = Task::new(task.id, task.task_deps, conf.clone(), task.body);
         tasks.push(task);
     }
-    if !msg.adjust_instance_id.is_empty() {
+    if !msg.adjust_instance_id_and_crash_counters.is_empty() {
         for task in &mut tasks {
-            if let Some(instance_id) = msg.adjust_instance_id.get(&task.id) {
+            if let Some((instance_id, crash_counter)) =
+                msg.adjust_instance_id_and_crash_counters.get(&task.id)
+            {
                 task.instance_id = *instance_id;
+                task.crash_counter = *crash_counter;
             }
         }
     }

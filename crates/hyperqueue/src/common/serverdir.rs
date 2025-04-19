@@ -82,20 +82,23 @@ fn resolve_active_directory(path: &Path) -> PathBuf {
 }
 
 fn serde_serialize_key<S: Serializer>(
-    key: &Arc<SecretKey>,
+    key: &Option<Arc<SecretKey>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    let str = serialize_key(key);
-    serializer.serialize_str(&str)
+    serializer.serialize_some(&key.as_ref().map(|k| serialize_key(k)))
 }
 
 fn serde_deserialize_key<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<Arc<SecretKey>, D::Error> {
-    let key: String = Deserialize::deserialize(deserializer)?;
-    deserialize_key(&key)
-        .map(Arc::new)
-        .map_err(|e| D::Error::custom(format!("Could not load secret key {e}")))
+) -> Result<Option<Arc<SecretKey>>, D::Error> {
+    let key_or_none: Option<String> = Deserialize::deserialize(deserializer)?;
+    key_or_none
+        .map(|key| {
+            deserialize_key(&key)
+                .map(Arc::new)
+                .map_err(|e| D::Error::custom(format!("Could not load secret key {e}")))
+        })
+        .transpose()
 }
 
 /// Finds all child directories in the given directory.
@@ -191,7 +194,7 @@ pub struct ConnectAccessRecordPart {
 
     #[serde(serialize_with = "serde_serialize_key")]
     #[serde(deserialize_with = "serde_deserialize_key")]
-    pub secret_key: Arc<SecretKey>,
+    pub secret_key: Option<Arc<SecretKey>>,
 }
 
 impl FullAccessRecord {
@@ -225,11 +228,11 @@ impl FullAccessRecord {
     pub fn worker_port(&self) -> u16 {
         self.worker.port
     }
-    pub fn client_key(&self) -> &Arc<SecretKey> {
-        &self.client.secret_key
+    pub fn client_key(&self) -> Option<&Arc<SecretKey>> {
+        self.client.secret_key.as_ref()
     }
-    pub fn worker_key(&self) -> &Arc<SecretKey> {
-        &self.worker.secret_key
+    pub fn worker_key(&self) -> Option<&Arc<SecretKey>> {
+        self.worker.secret_key.as_ref()
     }
 
     pub fn split(self) -> (ClientAccessRecord, WorkerAccessRecord) {
@@ -307,12 +310,12 @@ mod tests {
             ConnectAccessRecordPart {
                 host: "foo".into(),
                 port: 42,
-                secret_key: Arc::new(generate_key()),
+                secret_key: Some(Arc::new(generate_key())),
             },
             ConnectAccessRecordPart {
                 host: "bar".into(),
                 port: 42,
-                secret_key: Arc::new(generate_key()),
+                secret_key: Some(Arc::new(generate_key())),
             },
             "testHQ".into(),
         );
@@ -325,13 +328,13 @@ mod tests {
         assert_eq!(loaded.version, record.version);
         assert_eq!(loaded.worker.host, record.worker_host());
         assert_eq!(loaded.worker.port, record.worker_port());
-        assert_eq!(&loaded.worker.secret_key, record.worker_key());
+        assert_eq!(loaded.worker.secret_key.as_ref(), record.worker_key());
 
         let loaded = load_client_access_file(&path).unwrap();
         assert_eq!(loaded.version, record.version);
         assert_eq!(loaded.client.host, record.client_host());
         assert_eq!(loaded.client.port, record.client_port());
-        assert_eq!(&loaded.client.secret_key, record.client_key());
+        assert_eq!(loaded.client.secret_key.as_ref(), record.client_key());
     }
 
     #[test]

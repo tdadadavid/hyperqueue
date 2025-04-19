@@ -3,19 +3,19 @@ use crate::server::autoalloc::QueueId;
 use crate::server::client::{submit_job_desc, validate_submit};
 use crate::server::event::journal::JournalReader;
 use crate::server::event::payload::EventPayload;
-use crate::server::job::{Job, JobTaskState, StartedTaskData};
+use crate::server::job::{Job, JobTaskState, StartedTaskData, SubmittedJobDescription};
 use crate::server::state::State;
-use crate::transfer::messages::{
-    AllocationQueueParams, JobDescription, JobSubmitDescription, SubmitRequest,
-};
+use crate::transfer::messages::{AllocationQueueParams, JobDescription, SubmitRequest};
 use crate::worker::start::RunningTaskContext;
 use crate::{JobId, JobTaskId, Map, make_tako_id, unwrap_tako_id};
 use std::path::Path;
 use tako::gateway::NewTasksMessage;
-use tako::{ItemId, WorkerId};
+use tako::{InstanceId, ItemId, WorkerId};
 
 struct RestorerTaskInfo {
     state: JobTaskState,
+    instance_id: Option<InstanceId>,
+    crash_counter: u32,
 }
 
 impl RestorerTaskInfo {
@@ -31,7 +31,7 @@ impl RestorerTaskInfo {
 
 struct RestorerJob {
     job_desc: JobDescription,
-    submit_descs: Vec<JobSubmitDescription>,
+    submit_descs: Vec<SubmittedJobDescription>,
     tasks: Map<JobTaskId, RestorerTaskInfo>,
     is_open: bool,
 }
@@ -39,6 +39,10 @@ struct RestorerJob {
 pub struct Queue {
     pub queue_id: QueueId,
     pub params: Box<AllocationQueueParams>,
+}
+
+fn is_task_completed(tasks: &Map<JobTaskId, RestorerTaskInfo>, task_id: JobTaskId) -> bool {
+    tasks.get(&task_id).is_some_and(|tt| tt.is_completed())
 }
 
 impl RestorerJob {
@@ -51,34 +55,41 @@ impl RestorerJob {
         let job = Job::new(job_id, self.job_desc, self.is_open);
         state.add_job(job);
         let mut result: Vec<NewTasksMessage> = Vec::new();
-        for submit_desc in self.submit_descs {
-            if let Some(e) = validate_submit(state.get_job(job_id), &submit_desc.task_desc) {
+        for submit in self.submit_descs {
+            if let Some(e) = validate_submit(state.get_job(job_id), &submit.description().task_desc)
+            {
                 return Err(HqError::GenericError(format!(
                     "Job validation failed {e:?}"
                 )));
             }
-            let mut new_tasks = submit_job_desc(state, job_id, submit_desc);
+            let mut new_tasks = submit_job_desc(
+                state,
+                job_id,
+                submit.description().clone(),
+                submit.submitted_at(),
+            );
             let job = state.get_job_mut(job_id).unwrap();
 
-            new_tasks.tasks.retain(|t| {
+            new_tasks.tasks.retain_mut(|t| {
                 let (_, task_id) = unwrap_tako_id(t.id);
-                self.tasks
-                    .get(&task_id)
-                    .map(|tt| !tt.is_completed())
-                    .unwrap_or(true)
+                t.task_deps
+                    .retain(|d| !is_task_completed(&self.tasks, unwrap_tako_id(*d).1));
+                !is_task_completed(&self.tasks, task_id)
             });
 
             for (task_id, job_task) in job.tasks.iter_mut() {
                 if let Some(task) = self.tasks.get_mut(task_id) {
+                    if task.crash_counter > 0 || task.instance_id.is_some() {
+                        new_tasks.adjust_instance_id_and_crash_counters.insert(
+                            make_tako_id(job_id, *task_id),
+                            (
+                                task.instance_id.map(|x| x.as_num() + 1).unwrap_or(0).into(),
+                                task.crash_counter,
+                            ),
+                        );
+                    }
                     match &task.state {
-                        JobTaskState::Waiting => continue,
-                        JobTaskState::Running { started_data } => {
-                            let instance_id = started_data.context.instance_id.as_num() + 1;
-                            new_tasks
-                                .adjust_instance_id
-                                .insert(make_tako_id(job_id, *task_id), instance_id.into());
-                            continue;
-                        }
+                        JobTaskState::Waiting | JobTaskState::Running { .. } => continue,
                         JobTaskState::Finished { .. } => job.counters.n_finished_tasks += 1,
                         JobTaskState::Failed { .. } => job.counters.n_failed_tasks += 1,
                         JobTaskState::Canceled { .. } => job.counters.n_canceled_tasks += 1,
@@ -102,8 +113,21 @@ impl RestorerJob {
         }
     }
 
-    pub fn add_submit(&mut self, submit_desc: JobSubmitDescription) {
-        self.submit_descs.push(submit_desc)
+    pub fn add_submit(&mut self, submit: SubmittedJobDescription) {
+        self.submit_descs.push(submit)
+    }
+
+    pub fn increase_crash_counters(&mut self, worker_id: WorkerId) {
+        for task in self.tasks.values_mut() {
+            match &task.state {
+                JobTaskState::Running { started_data }
+                    if started_data.worker_ids.contains(&worker_id) =>
+                {
+                    task.crash_counter += 1;
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -166,13 +190,23 @@ impl StateRestorer {
         log::debug!("Loading event file {}", path.display());
         let mut event_reader = JournalReader::open(path)?;
         for event in &mut event_reader {
-            let event = event?;
+            let event = event.map_err(|error| {
+                crate::Error::DeserializationError(format!(
+                    "Journal load error: {error:?}.\nIt appears that the journal file is corrupted."
+                ))
+            })?;
             match event.payload {
                 EventPayload::WorkerConnected(worker_id, _) => {
                     log::debug!("Replaying: WorkerConnected {worker_id}");
                     self.max_worker_id = self.max_worker_id.max(worker_id.as_num());
                 }
-                EventPayload::WorkerLost(_, _) => {}
+                EventPayload::WorkerLost(worker_id, reason) => {
+                    if reason.is_failure() {
+                        for job in self.jobs.values_mut() {
+                            job.increase_crash_counters(worker_id);
+                        }
+                    }
+                }
                 EventPayload::WorkerOverviewReceived(_) => {}
                 EventPayload::Submit {
                     job_id,
@@ -183,10 +217,16 @@ impl StateRestorer {
                     let submit_request: SubmitRequest = serialized_desc.deserialize()?;
                     if closed_job {
                         let mut job = RestorerJob::new(submit_request.job_desc, false);
-                        job.add_submit(submit_request.submit_desc);
+                        job.add_submit(SubmittedJobDescription::at(
+                            event.time,
+                            submit_request.submit_desc,
+                        ));
                         self.add_job(job_id, job);
                     } else if let Some(job) = self.get_job_mut(job_id) {
-                        job.add_submit(submit_request.submit_desc)
+                        job.add_submit(SubmittedJobDescription::at(
+                            event.time,
+                            submit_request.submit_desc,
+                        ));
                     } else {
                         log::warn!("Ignoring submit attachment to an non-existing job")
                     }
@@ -215,6 +255,8 @@ impl StateRestorer {
                                         worker_ids: workers,
                                     },
                                 },
+                                instance_id: Some(instance_id),
+                                crash_counter: 0,
                             },
                         );
                     }
@@ -283,6 +325,8 @@ impl StateRestorer {
                                         started_data: None,
                                         cancelled_date: event.time,
                                     },
+                                    instance_id: None,
+                                    crash_counter: 0,
                                 },
                             );
                         }

@@ -30,14 +30,13 @@ fn crawl<F1: Fn(&Task) -> &Set<TaskId>>(tasks: &mut TaskMap, predecessor_fn: F1)
         task.set_scheduler_priority(level + 1);
 
         for t in task.task_deps.iter() {
-            let v: &mut u32 = neighbours
-                .get_mut(t)
-                .expect("Couldn't find task neighbour in level computation");
-            if *v <= 1 {
-                assert_eq!(*v, 1);
-                stack.push(*t);
-            } else {
-                *v -= 1;
+            if let Some(v) = neighbours.get_mut(t) {
+                if *v <= 1 {
+                    assert_eq!(*v, 1);
+                    stack.push(*t);
+                } else {
+                    *v -= 1;
+                }
             }
         }
     }

@@ -18,9 +18,6 @@ pub struct WaitingInfo {
 }
 
 #[cfg_attr(test, derive(Eq, PartialEq))]
-pub struct FinishInfo {}
-
-#[cfg_attr(test, derive(Eq, PartialEq))]
 pub enum TaskRuntimeState {
     Waiting(WaitingInfo),
     Assigned(WorkerId),
@@ -28,7 +25,7 @@ pub enum TaskRuntimeState {
     Running { worker_id: WorkerId },
     // The first worker is the root node where the command is executed, others are reserved
     RunningMultiNode(Vec<WorkerId>),
-    Finished(FinishInfo),
+    Finished,
 }
 
 impl fmt::Debug for TaskRuntimeState {
@@ -39,7 +36,7 @@ impl fmt::Debug for TaskRuntimeState {
             Self::Stealing(from_w, to_w) => write!(f, "S({from_w}, {to_w:?})"),
             Self::Running { worker_id, .. } => write!(f, "R({worker_id})"),
             Self::RunningMultiNode(ws) => write!(f, "M({ws:?})"),
-            Self::Finished(_) => write!(f, "F"),
+            Self::Finished => write!(f, "F"),
         }
     }
 }
@@ -95,7 +92,12 @@ impl Task {
         configuration: Rc<TaskConfiguration>,
         body: Box<[u8]>,
     ) -> Self {
-        log::debug!("New task {} {:?}", id, &configuration.resources);
+        log::debug!(
+            "New task {} {:?} {:?}",
+            id,
+            &configuration.resources,
+            &dependencies
+        );
 
         let mut flags = TaskFlags::empty();
         flags.set(TaskFlags::FRESH, true);
@@ -130,8 +132,8 @@ impl Task {
         matches!(self.state, TaskRuntimeState::Running { .. })
     }
 
-    #[cfg(test)]
     #[inline]
+    #[cfg(test)]
     pub(crate) fn is_mn_running(&self) -> bool {
         matches!(self.state, TaskRuntimeState::RunningMultiNode { .. })
     }
@@ -152,11 +154,6 @@ impl Task {
     #[inline]
     pub fn id(&self) -> TaskId {
         self.id
-    }
-
-    #[inline]
-    pub(crate) fn has_consumers(&self) -> bool {
-        !self.consumers.is_empty()
     }
 
     #[inline]
@@ -190,11 +187,6 @@ impl Task {
     #[inline]
     pub(crate) fn is_taken(&self) -> bool {
         self.flags.contains(TaskFlags::TAKE)
-    }
-
-    #[inline]
-    pub(crate) fn is_removable(&self) -> bool {
-        self.consumers.is_empty() && self.is_finished()
     }
 
     pub(crate) fn collect_consumers(&self, taskmap: &TaskMap) -> Set<TaskId> {
@@ -270,14 +262,14 @@ impl Task {
 
     #[inline]
     pub(crate) fn is_finished(&self) -> bool {
-        matches!(&self.state, TaskRuntimeState::Finished(_))
+        matches!(&self.state, TaskRuntimeState::Finished)
     }
 
     #[inline]
     pub(crate) fn is_done_or_running(&self) -> bool {
         matches!(
             &self.state,
-            TaskRuntimeState::Finished(_) | TaskRuntimeState::Running { .. }
+            TaskRuntimeState::Finished | TaskRuntimeState::Running { .. }
         )
     }
 
@@ -290,7 +282,7 @@ impl Task {
             TaskRuntimeState::Waiting(_)
             | TaskRuntimeState::Stealing(_, None)
             | TaskRuntimeState::RunningMultiNode(_)
-            | TaskRuntimeState::Finished(_) => None,
+            | TaskRuntimeState::Finished => None,
         }
     }
 

@@ -72,6 +72,32 @@ Example submission script:
 The worker will try to automatically detect that it is started under a PBS/Slurm job, but you can also explicitly pass
 the option `--manager <pbs/slurm>` to tell the worker that it should expect a specific environment.
 
+#### Deploying a worker using SSH
+
+If you have an OpenSSH-compatible `ssh` binary available in your environment, HQ can deploy workers to a set of hostnames using the `deploy-ssh` command:
+
+```bash
+$ hq worker deploy-ssh <nodefile> <worker-args>
+```
+
+To use this command, you need to prepare a *hostfile*, which should contain a set of lines describing individual hostnames on which you want to deploy the workers:
+```text
+node1
+node2:1234
+```
+
+As you can see above, each hostname can optionally have an attached SSH port (to change the default SSH port number `22`).
+
+Assume that the content above is stored in a file called `hostfile.txt`. If we then execute the following command:
+```bash
+$ hq worker deploy-ssh hostfile.txt --time-limit 1h
+```
+HQ would run `hq worker start --time-limit 1h` on both `node1` and `node2:1234`.
+
+The nodes have to be accessible using a passwordless SSH connection.
+
+You can also use the `--show-output` flag to display output of the workers. You need to pass this flag before the `<nodefile>` argument.
+
 #### Stopping workers
 If you have started a worker manually, and you want to stop it, you can use the `hq worker stop` command[^2]:
 

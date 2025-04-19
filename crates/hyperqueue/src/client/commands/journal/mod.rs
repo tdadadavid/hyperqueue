@@ -6,7 +6,7 @@ use crate::common::utils::str::pluralize;
 use crate::rpc_call;
 use crate::server::bootstrap::get_client_session;
 use crate::server::event::journal::JournalReader;
-use crate::transfer::messages::{FromClientMessage, ToClientMessage};
+use crate::transfer::messages::{FromClientMessage, StreamEvents, ToClientMessage};
 use anyhow::anyhow;
 use clap::{Parser, ValueHint};
 use std::io::{BufWriter, Write};
@@ -25,8 +25,13 @@ enum JournalCommand {
     /// Events will be exported to `stdout`, you can redirect it e.g. to a file.
     Export(ExportOpts),
 
-    /// Live stream events from the server.
+    /// Stream events from a running server, it first replays old events
+    /// then it waits for new live events.
     Stream,
+
+    /// Stream events from a running server, it replays old events
+    /// after that it terminates the connection.
+    Replay,
 
     /// Connect to a server and remove completed tasks and non-active workers from journal
     Prune,
@@ -46,28 +51,35 @@ struct ExportOpts {
 pub async fn command_journal(gsettings: &GlobalSettings, opts: JournalOpts) -> anyhow::Result<()> {
     match opts.command {
         JournalCommand::Export(opts) => export_json(opts),
-        JournalCommand::Stream => stream_json(gsettings).await,
+        JournalCommand::Replay => stream_json(gsettings, false).await,
+        JournalCommand::Stream => stream_json(gsettings, true).await,
         JournalCommand::Prune => prune_journal(gsettings).await,
         JournalCommand::Flush => flush_journal(gsettings).await,
     }
 }
 
-async fn stream_json(gsettings: &GlobalSettings) -> anyhow::Result<()> {
+async fn stream_json(gsettings: &GlobalSettings, live_events: bool) -> anyhow::Result<()> {
     let mut connection = get_client_session(gsettings.server_directory()).await?;
     connection
         .connection()
-        .send(FromClientMessage::StreamEvents)
+        .send(FromClientMessage::StreamEvents(StreamEvents {
+            live_events,
+        }))
         .await?;
     let stdout = std::io::stdout();
     let stdout = stdout.lock();
     let mut stdout = BufWriter::new(stdout);
     while let Some(event) = connection.connection().receive().await {
         let event = event?;
-        if let ToClientMessage::Event(e) = event {
-            writeln!(stdout, "{}", format_event(e))?;
-            stdout.flush()?;
-        } else {
-            anyhow::bail!("Invalid message receive, not ToClientMessage::Event");
+        match event {
+            ToClientMessage::Event(e) => {
+                writeln!(stdout, "{}", format_event(e))?;
+                stdout.flush()?;
+            }
+            ToClientMessage::EventLiveBoundary => { /* Do nothing */ }
+            _ => {
+                anyhow::bail!("Invalid message receive, not ToClientMessage::Event");
+            }
         }
     }
     Ok(())

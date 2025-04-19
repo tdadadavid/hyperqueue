@@ -50,17 +50,30 @@ impl Output for JsonOutput {
         self.print(format_worker_info(worker_info));
     }
 
-    fn print_server_description(&self, server_dir: Option<&Path>, record: &ServerInfo) {
+    fn print_server_info(&self, server_dir: Option<&Path>, info: &ServerInfo) {
+        let ServerInfo {
+            server_uid,
+            client_host,
+            worker_host,
+            client_port,
+            worker_port,
+            version,
+            pid,
+            start_date,
+            journal_path,
+        } = info;
+
         let json = json!({
             "server_dir": server_dir,
-            "server_uid": record.server_uid,
-            "worker_host": record.worker_host,
-            "client_host": record.client_host,
-            "client_port": record.client_port,
-            "worker_port": record.worker_port,
-            "pid": record.pid,
-            "start_date": record.start_date,
-            "version": record.version,
+            "server_uid": server_uid,
+            "worker_host": worker_host,
+            "client_host": client_host,
+            "client_port": client_port,
+            "worker_port": worker_port,
+            "pid": pid,
+            "start_date": start_date,
+            "version": version,
+            "journal_path": journal_path
         });
         self.print(json);
     }
@@ -116,7 +129,7 @@ impl Output for JsonOutput {
                                     "started_at": format_datetime(submission_date),
                                     "finished_at": finished_at.map(format_datetime),
                                     "submits": submit_descs.iter().map(|submit_desc|
-                match &submit_desc.task_desc {
+                match &submit_desc.description().task_desc {
                                     JobTaskDescription::Array { task_desc, .. } => {
                                         json!({
                                             "array": format_task_description(task_desc)
@@ -507,6 +520,8 @@ fn format_worker_info(worker_info: WorkerInfo) -> serde_json::Value {
             },
         started,
         ended,
+        runtime_info,
+        last_task_started,
     } = worker_info;
 
     json!({
@@ -526,6 +541,8 @@ fn format_worker_info(worker_info: WorkerInfo) -> serde_json::Value {
             "manager": FormattedManagerType(info.manager),
             "id": info.allocation_id
         })),
+        "runtime_info": runtime_info,
+        "last_task_started": last_task_started,
         "started": format_datetime(started),
         "ended": ended.map(|info| json!({
             "at": format_datetime(info.ended_at)

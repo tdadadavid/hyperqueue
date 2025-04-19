@@ -46,6 +46,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use tako::gateway::{
     LostWorkerReason, ResourceRequest, ResourceRequestEntry, ResourceRequestVariants,
+    WorkerRuntimeInfo,
 };
 use tako::{Map, format_comma_delimited};
 
@@ -237,31 +238,7 @@ impl Output for CliOutput {
                 let manager_info = worker.configuration.get_manager_info();
                 vec![
                     worker.id.cell().justify(Justify::Right),
-                    match worker.ended.as_ref() {
-                        None => "RUNNING".cell().foreground_color(Some(Color::Green)),
-                        Some(WorkerExitInfo {
-                            reason: LostWorkerReason::ConnectionLost,
-                            ..
-                        }) => "CONNECTION LOST".cell().foreground_color(Some(Color::Red)),
-                        Some(WorkerExitInfo {
-                            reason: LostWorkerReason::HeartbeatLost,
-                            ..
-                        }) => "HEARTBEAT LOST".cell().foreground_color(Some(Color::Red)),
-                        Some(WorkerExitInfo {
-                            reason: LostWorkerReason::IdleTimeout,
-                            ..
-                        }) => "IDLE TIMEOUT".cell().foreground_color(Some(Color::Cyan)),
-                        Some(WorkerExitInfo {
-                            reason: LostWorkerReason::Stopped,
-                            ..
-                        }) => "STOPPED".cell().foreground_color(Some(Color::Magenta)),
-                        Some(WorkerExitInfo {
-                            reason: LostWorkerReason::TimeLimitReached,
-                            ..
-                        }) => "TIME LIMIT REACHED"
-                            .cell()
-                            .foreground_color(Some(Color::Cyan)),
-                    },
+                    worker_status(&worker),
                     worker.configuration.hostname.cell(),
                     resources_summary(&worker.configuration.resources, false).cell(),
                     manager_info
@@ -291,16 +268,20 @@ impl Output for CliOutput {
     }
 
     fn print_worker_info(&self, worker_info: WorkerInfo) {
+        let state = worker_status(&worker_info);
         let WorkerInfo {
             id,
             configuration,
             started,
             ended: _ended,
+            runtime_info,
+            last_task_started,
         } = worker_info;
 
         let manager_info = configuration.get_manager_info();
-        let rows = vec![
+        let mut rows = vec![
             vec!["Worker ID".cell().bold(true), id.cell()],
+            vec!["State".cell().bold(true), state],
             vec!["Hostname".cell().bold(true), configuration.hostname.cell()],
             vec!["Started".cell().bold(true), format_datetime(started).cell()],
             vec![
@@ -363,31 +344,92 @@ impl Output for CliOutput {
                     .unwrap_or("N/A")
                     .cell(),
             ],
+            vec![
+                "Last task started".cell().bold(true),
+                last_task_started
+                    .map(|t| {
+                        format!(
+                            "Job: {}; Task: {}; Time: {}",
+                            t.job_id,
+                            t.task_id,
+                            format_datetime(t.time)
+                        )
+                        .cell()
+                    })
+                    .unwrap_or_else(|| "".cell()),
+            ],
         ];
+        if let Some(runtime_info) = runtime_info {
+            let mut s = String::with_capacity(60);
+            match runtime_info {
+                WorkerRuntimeInfo::SingleNodeTasks {
+                    running_tasks,
+                    assigned_tasks,
+                    is_reserved,
+                } => {
+                    write!(s, "assigned tasks: {}", assigned_tasks).unwrap();
+                    if running_tasks > 0 {
+                        write!(s, "; running tasks: {}", running_tasks).unwrap();
+                    }
+                    if is_reserved {
+                        write!(s, "; reserved for a multi-node task").unwrap();
+                    }
+                }
+                WorkerRuntimeInfo::MultiNodeTask { main_node } => {
+                    write!(s, "running multinode task; ").unwrap();
+                    if main_node {
+                        write!(s, "main node").unwrap();
+                    } else {
+                        write!(s, "secondary node").unwrap();
+                    }
+                }
+            };
+            rows.push(vec!["Runtime Info".cell().bold(true), s.cell()]);
+        }
         self.print_vertical_table(rows);
     }
 
-    fn print_server_description(&self, server_dir: Option<&Path>, info: &ServerInfo) {
+    fn print_server_info(&self, server_dir: Option<&Path>, info: &ServerInfo) {
+        let ServerInfo {
+            server_uid,
+            client_host,
+            worker_host,
+            client_port,
+            worker_port,
+            version,
+            pid,
+            start_date,
+            journal_path,
+        } = info;
+
         let mut rows = vec![
             vec![
                 "Server UID".cell().bold(true),
-                info.server_uid.to_string().cell(),
+                server_uid.to_string().cell(),
             ],
             vec![
                 "Client host".cell().bold(true),
-                info.client_host.to_string().cell(),
+                client_host.to_string().cell(),
             ],
-            vec!["Client port".cell().bold(true), info.client_port.cell()],
+            vec!["Client port".cell().bold(true), client_port.cell()],
             vec![
                 "Worker host".cell().bold(true),
-                info.worker_host.to_string().cell(),
+                worker_host.to_string().cell(),
             ],
-            vec!["Worker port".cell().bold(true), info.worker_port.cell()],
-            vec!["Version".cell().bold(true), info.version.to_string().cell()],
-            vec!["Pid".cell().bold(true), info.pid.cell()],
+            vec!["Worker port".cell().bold(true), worker_port.cell()],
+            vec!["Version".cell().bold(true), version.to_string().cell()],
+            vec!["Pid".cell().bold(true), pid.cell()],
             vec![
                 "Start date".cell().bold(true),
-                info.start_date.format("%F %T %Z").cell(),
+                start_date.format("%F %T %Z").cell(),
+            ],
+            vec![
+                "Journal path".cell().bold(true),
+                journal_path
+                    .as_ref()
+                    .map(|p| format!("{}", p.display()))
+                    .unwrap_or_else(|| "".to_string())
+                    .cell(),
             ],
         ];
         if let Some(dir) = server_dir {
@@ -508,16 +550,18 @@ impl Output for CliOutput {
             let mut n_tasks = info.n_tasks.to_string();
 
             let ids = if submit_descs.len() == 1
-                && matches!(&submit_descs[0].task_desc, JobTaskDescription::Array { .. })
-            {
-                match &submit_descs[0].task_desc {
+                && matches!(
+                    &submit_descs[0].description().task_desc,
+                    JobTaskDescription::Array { .. }
+                ) {
+                match &submit_descs[0].description().task_desc {
                     JobTaskDescription::Array { ids, .. } => ids.clone(),
                     _ => unreachable!(),
                 }
             } else {
                 let mut ids: Vec<u32> = submit_descs
                     .iter()
-                    .flat_map(|submit_desc| match &submit_desc.task_desc {
+                    .flat_map(|submit_desc| match &submit_desc.description().task_desc {
                         JobTaskDescription::Array { ids, .. } => {
                             itertools::Either::Left(ids.iter())
                         }
@@ -540,7 +584,9 @@ impl Output for CliOutput {
             ]);
 
             if submit_descs.len() == 1 {
-                if let JobTaskDescription::Array { task_desc, .. } = &submit_descs[0].task_desc {
+                if let JobTaskDescription::Array { task_desc, .. } =
+                    &submit_descs[0].description().task_desc
+                {
                     self.print_job_shared_task_description(&mut rows, task_desc);
                 }
             }
@@ -553,7 +599,12 @@ impl Output for CliOutput {
             if submit_descs.len() == 1 {
                 rows.push(vec![
                     "Submission directory".cell().bold(true),
-                    submit_descs[0].submit_dir.to_str().unwrap().cell(),
+                    submit_descs[0]
+                        .description()
+                        .submit_dir
+                        .to_str()
+                        .unwrap()
+                        .cell(),
                 ]);
             }
 
@@ -705,9 +756,8 @@ impl Output for CliOutput {
             let (cwd, stdout, stderr) = format_task_paths(&task_to_paths, *task_id);
 
             let (task_desc, task_deps) = if let Some(x) =
-                job.submit_descs
-                    .iter()
-                    .find_map(|submit_desc| match &submit_desc.task_desc {
+                job.submit_descs.iter().find_map(|submit_desc| {
+                    match &submit_desc.description().task_desc {
                         JobTaskDescription::Array {
                             ids,
                             entries: _,
@@ -719,7 +769,8 @@ impl Output for CliOutput {
                                 (&task_dep.task_desc, task_dep.dependencies.as_slice())
                             })
                         }
-                    }) {
+                    }
+                }) {
                 x
             } else {
                 log::error!("Task {task_id} not found in (graph) job {job_id}");
@@ -1102,6 +1153,34 @@ fn job_status_to_cell(info: &JobInfo) -> String {
         colored::Color::Cyan,
     );
     result
+}
+
+pub fn worker_status(worker_info: &WorkerInfo) -> CellStruct {
+    match worker_info.ended.as_ref() {
+        None => "RUNNING".cell().foreground_color(Some(Color::Green)),
+        Some(WorkerExitInfo {
+            reason: LostWorkerReason::ConnectionLost,
+            ..
+        }) => "CONNECTION LOST".cell().foreground_color(Some(Color::Red)),
+        Some(WorkerExitInfo {
+            reason: LostWorkerReason::HeartbeatLost,
+            ..
+        }) => "HEARTBEAT LOST".cell().foreground_color(Some(Color::Red)),
+        Some(WorkerExitInfo {
+            reason: LostWorkerReason::IdleTimeout,
+            ..
+        }) => "IDLE TIMEOUT".cell().foreground_color(Some(Color::Cyan)),
+        Some(WorkerExitInfo {
+            reason: LostWorkerReason::Stopped,
+            ..
+        }) => "STOPPED".cell().foreground_color(Some(Color::Magenta)),
+        Some(WorkerExitInfo {
+            reason: LostWorkerReason::TimeLimitReached,
+            ..
+        }) => "TIME LIMIT REACHED"
+            .cell()
+            .foreground_color(Some(Color::Cyan)),
+    }
 }
 
 pub fn job_progress_bar(counters: JobTaskCounters, n_tasks: JobTaskCount, width: usize) -> String {

@@ -80,20 +80,20 @@ impl ResourceAllocator {
         self.own_resources.is_capable_to_run_request(request)
     }
 
-    pub fn init_allocator(&mut self, remaining_time: Option<Duration>) {
+    pub fn reset_temporaries(&mut self, remaining_time: Option<Duration>) {
         self.remaining_time = remaining_time;
         self.higher_priority_blocked_requests = 0;
         self.blocked_requests.clear();
     }
 
     fn release_allocation_helper(&mut self, allocation: &Allocation) {
-        self.free_resources.add(allocation);
         for al in &allocation.resources {
             self.pools[al.resource_id].release_allocation(al);
         }
     }
 
     pub fn release_allocation(&mut self, allocation: Rc<Allocation>) {
+        self.free_resources.add(&allocation);
         self.release_allocation_helper(&allocation);
         let position = self
             .running_tasks
@@ -188,11 +188,6 @@ impl ResourceAllocator {
         running: &mut [Rc<Allocation>],
         request: &ResourceRequest,
     ) -> Vec<ConciseFreeResources> {
-        let mut full = free_resources.clone();
-        for running in running.iter() {
-            full.add(running);
-        }
-
         let mut witnesses: Vec<ConciseFreeResources> =
             Vec::with_capacity(2 * free_resources.n_resources());
 
@@ -206,8 +201,6 @@ impl ResourceAllocator {
 
         for i in 0..free_resources.n_resources() {
             let idx = ResourceId::from(i as u32);
-            /*running
-            .sort_unstable_by_key(|x| (x.get_sum(idx), -(x.fraction(&full) * 10_000.0) as u32));*/
             running.sort_unstable_by_key(|x| {
                 x.resource_allocation(idx)
                     .map(|a| a.amount)
@@ -279,12 +272,11 @@ impl ResourceAllocator {
             allocation
                 .add_resource_allocation(pool.claim_resources(entry.resource_id, &entry.request))
         }
-        self.free_resources.remove(&allocation);
-
         if !self.check_blocked_request(&allocation) {
             self.release_allocation_helper(&allocation);
             return None;
         }
+        self.free_resources.remove(&allocation);
         let allocation_rc = Rc::new(allocation);
         self.running_tasks.push(allocation_rc.clone());
         Some(allocation_rc)
@@ -403,7 +395,7 @@ mod tests {
                 .finish();
             ac.try_allocate_variant(&rq).unwrap();
         }
-        ac.init_allocator(remaining_time);
+        ac.reset_temporaries(remaining_time);
         ac
     }
 
@@ -680,7 +672,7 @@ mod tests {
         allocator.release_allocation(al);
         assert_eq!(allocator.running_tasks.len(), 0);
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq = cpus_compact(4).finish_v();
         let (al, _idx) = allocator.try_allocate(&rq).unwrap();
@@ -698,7 +690,7 @@ mod tests {
             .assert_eq_units(4);
         assert_eq!(allocator.free_resources.get(0.into()).n_groups(), 1);
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq = cpus_compact(1).finish_v();
         let rq2 = cpus_compact(2).finish_v();
@@ -712,7 +704,7 @@ mod tests {
         allocator.release_allocation(al2);
         allocator.release_allocation(al4);
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let (al5, _) = allocator.try_allocate(&rq2).unwrap();
 
@@ -762,20 +754,20 @@ mod tests {
         let (al, _) = allocator.try_allocate(&rq3).unwrap();
         assert_eq!(allocator.get_sockets(&al, 0).len(), 1);
         allocator.release_allocation(al);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq3 = cpus_compact(7).finish_v();
         let (al, _) = allocator.try_allocate(&rq3).unwrap();
         assert_eq!(allocator.get_sockets(&al, 0).len(), 2);
 
         allocator.release_allocation(al);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq3 = cpus_compact(8).finish_v();
         let (al, _) = allocator.try_allocate(&rq3).unwrap();
         assert_eq!(allocator.get_sockets(&al, 0).len(), 2);
         allocator.release_allocation(al);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq3 = cpus_compact(9).finish_v();
         let (al, _) = allocator.try_allocate(&rq3).unwrap();
@@ -822,7 +814,7 @@ mod tests {
         allocator.release_allocation(al);
         assert_eq!(allocator.get_current_free(0), ResourceAmount::new_units(24));
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq2 = cpus_compact(1).finish_v();
         assert!(allocator.try_allocate(&rq2).is_some());
@@ -881,7 +873,7 @@ mod tests {
         allocator.release_allocation(al1);
         allocator.validate();
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq1 = ResBuilder::default().add_force_compact(0, 5).finish_v();
         let (al1, _) = allocator.try_allocate(&rq1).unwrap();
@@ -890,7 +882,7 @@ mod tests {
         allocator.release_allocation(al1);
         allocator.validate();
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         let rq1 = ResBuilder::default().add_force_compact(0, 10).finish_v();
         let (al1, _idx) = allocator.try_allocate(&rq1).unwrap();
@@ -1024,7 +1016,7 @@ mod tests {
         assert_eq!(allocator.get_current_free(3), ResourceAmount::new_units(2));
         assert_eq!(allocator.get_current_free(4), ResourceAmount::new_units(2));
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         assert!(allocator.try_allocate(&rq).is_some());
 
         allocator.validate();
@@ -1035,7 +1027,7 @@ mod tests {
         let descriptor = simple_descriptor(1, 4);
         let mut allocator = test_allocator(&descriptor);
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let rq = ResBuilder::default()
             .add(0, 1)
             .min_time_secs(100)
@@ -1043,11 +1035,11 @@ mod tests {
         let (al, _) = allocator.try_allocate(&rq).unwrap();
         allocator.release_allocation(al);
 
-        allocator.init_allocator(Some(Duration::from_secs(101)));
+        allocator.reset_temporaries(Some(Duration::from_secs(101)));
         let (al, _) = allocator.try_allocate(&rq).unwrap();
         allocator.release_allocation(al);
 
-        allocator.init_allocator(Some(Duration::from_secs(99)));
+        allocator.reset_temporaries(Some(Duration::from_secs(99)));
         assert!(allocator.try_allocate(&rq).is_none());
 
         allocator.validate();
@@ -1062,7 +1054,7 @@ mod tests {
             },
         }]);
         let mut allocator = test_allocator(&descriptor);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let rq = ResBuilder::default()
             .add(0, ResourceAmount::new(1, 0))
             .finish_v();
@@ -1081,7 +1073,7 @@ mod tests {
     fn test_allocator_indices_and_fractions() {
         let descriptor = simple_descriptor(1, 4);
         let mut allocator = test_allocator(&descriptor);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let rq = ResBuilder::default()
             .add(0, ResourceAmount::new(4, 1))
             .finish_v();
@@ -1141,7 +1133,7 @@ mod tests {
         // Two 0.75 does not gives 1.5
         let descriptor = simple_descriptor(1, 2);
         let mut allocator = test_allocator(&descriptor);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let rq1 = ResBuilder::default()
             .add(0, ResourceAmount::new(0, 7500))
             .finish_v();
@@ -1160,7 +1152,7 @@ mod tests {
         allocator.release_allocation(al1);
         allocator.release_allocation(al2);
 
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
 
         assert_eq!(
             allocator.pools[0.into()].concise_state().amount_sum(),
@@ -1172,7 +1164,7 @@ mod tests {
             .finish_v();
         assert!(allocator.try_allocate(&rq3).is_none());
         allocator.release_allocation(al4);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let al5 = allocator.try_allocate(&rq3).unwrap().0;
         allocator.release_allocation(al3);
         allocator.release_allocation(al5);
@@ -1187,7 +1179,7 @@ mod tests {
     fn test_allocator_groups_and_fractions_scatter() {
         let descriptor = simple_descriptor(3, 2);
         let mut allocator = test_allocator(&descriptor);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let rq1 = ResBuilder::default()
             .add_scatter(0, ResourceAmount::new(6, 1))
             .finish_v();
@@ -1216,7 +1208,7 @@ mod tests {
     fn test_allocator_groups_and_fractions() {
         let descriptor = simple_descriptor(3, 2);
         let mut allocator = test_allocator(&descriptor);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let rq1 = ResBuilder::default()
             .add(0, ResourceAmount::new(6, 1))
             .finish_v();
@@ -1304,7 +1296,7 @@ mod tests {
             },
         }]);
         let mut allocator = test_allocator(&descriptor);
-        allocator.init_allocator(None);
+        allocator.reset_temporaries(None);
         let rq = ResBuilder::default()
             .add(0, ResourceAmount::new(2, 3000))
             .finish_v();

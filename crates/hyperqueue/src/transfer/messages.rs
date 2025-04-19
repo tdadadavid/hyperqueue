@@ -7,15 +7,14 @@ use crate::client::status::Status;
 use crate::common::arraydef::IntArray;
 use crate::common::manager::info::ManagerType;
 use crate::server::autoalloc::{Allocation, QueueId, QueueInfo};
-use crate::server::job::{JobTaskCounters, JobTaskInfo};
+use crate::server::job::{JobTaskCounters, JobTaskInfo, SubmittedJobDescription};
 use crate::{JobId, JobTaskCount, JobTaskId, Map, WorkerId};
 use bstr::BString;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::server::event::Event;
-use tako::gateway::{LostWorkerReason, ResourceRequestVariants};
+use tako::gateway::{LostWorkerReason, ResourceRequestVariants, WorkerRuntimeInfo};
 use tako::program::ProgramDefinition;
 use tako::worker::WorkerConfiguration;
 
@@ -41,7 +40,8 @@ pub enum FromClientMessage {
     // This command switches the connection into streaming connection,
     // it will no longer reacts to any other client messages
     // and client will only receive ToClientMessage::Event
-    StreamEvents,
+    // or ToClientMessage::EventLiveBoundary
+    StreamEvents(StreamEvents),
     PruneJournal,
     FlushJournal,
 }
@@ -84,6 +84,11 @@ pub struct TaskKindProgram {
     pub program: ProgramDefinition,
     pub pin_mode: PinMode,
     pub task_dir: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StreamEvents {
+    pub live_events: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -255,6 +260,7 @@ pub struct StopWorkerMessage {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct WorkerInfoRequest {
     pub worker_id: WorkerId,
+    pub runtime_info: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -322,6 +328,7 @@ pub struct ServerInfo {
     pub version: String,
     pub pid: u32,
     pub start_date: DateTime<Utc>,
+    pub journal_path: Option<PathBuf>,
 }
 
 // Messages server -> client
@@ -343,6 +350,9 @@ pub enum ToClientMessage {
     Error(String),
     ServerInfo(ServerInfo),
     Event(Event),
+    // This indicates in live event streaming when old events where
+    // old streamed, and now we are getting new ones
+    EventLiveBoundary,
     Finished, // Generic response, now used only for journal pruning/flushing
 }
 
@@ -409,11 +419,20 @@ pub struct WorkerExitInfo {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskTimestamp {
+    pub job_id: JobId,
+    pub task_id: JobTaskId,
+    pub time: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WorkerInfo {
     pub id: WorkerId,
     pub configuration: WorkerConfiguration,
     pub started: DateTime<Utc>,
     pub ended: Option<WorkerExitInfo>,
+    pub runtime_info: Option<WorkerRuntimeInfo>,
+    pub last_task_started: Option<TaskTimestamp>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -425,7 +444,7 @@ pub struct JobInfoResponse {
 pub struct JobDetail {
     pub info: JobInfo,
     pub job_desc: JobDescription,
-    pub submit_descs: Vec<Arc<JobSubmitDescription>>,
+    pub submit_descs: Vec<SubmittedJobDescription>,
     pub tasks: Vec<(JobTaskId, JobTaskInfo)>,
     pub tasks_not_found: Vec<JobTaskId>,
 

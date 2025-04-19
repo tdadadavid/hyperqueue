@@ -99,7 +99,9 @@ impl SchedulerState {
         try_prev_worker: bool, // Enable heuristics that tries to fit tasks on fewer workers
     ) -> Option<WorkerId> {
         // Fast path
-        if try_prev_worker && task.task_deps.is_empty() {
+        if try_prev_worker
+        /* LATER MIGRATE TO DATA OBJECTS, depending on task deps is wrong: && task.task_deps.is_empty()*/
+        {
             // Note: We are *not* using "is_capable_to_run" but "have_immediate_resources_for_rq",
             // because we want to enable fast path only if task can be directly executed
             // We want to avoid creation of overloaded
@@ -276,7 +278,7 @@ impl SchedulerState {
             }
             TaskRuntimeState::Running { .. }
             | TaskRuntimeState::RunningMultiNode(_)
-            | TaskRuntimeState::Finished(_) => {
+            | TaskRuntimeState::Finished => {
                 panic!("Invalid state {:?}", task.state);
             }
         };
@@ -420,7 +422,7 @@ impl SchedulerState {
                     let task = tasks.get_task_mut(task_id);
                     if task.is_sn_running()
                         || (not_overloaded
-                            && (task.is_fresh() || !task.task_deps.is_empty())
+                            && (task.is_fresh()/*|| THIS SHOULD LATER BE MIGRATED TO DATA OBJECTS, not task deps !task.task_deps.is_empty()*/)
                             && worker.has_time_to_run_for_rqv(&task.configuration.resources, now))
                     {
                         continue;

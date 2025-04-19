@@ -21,18 +21,21 @@ class Job:
         default_workdir: Optional[GenericPath] = None,
         max_fails: Optional[int] = 1,
         default_env: Optional[EnvType] = None,
+        name: Optional[str] = None,
     ):
         """
         :param default_workdir: Default working directory for tasks.
         :param max_fails: How many tasks can fail before the whole job will be cancelled.
         :param default_env: Environment variables that will be automatically set for each task in
         this job.
+        :param name: Name of the job.
         """
         self.tasks: List[Task] = []
         self.task_map: Dict[TaskId, Task] = {}
         self.max_fails = max_fails
         self.default_workdir = Path(default_workdir).resolve() if default_workdir is not None else default_workdir
         self.default_env = default_env or {}
+        self.name = name
 
     def task_by_id(self, id: TaskId) -> Optional[Task]:
         """
@@ -54,6 +57,7 @@ class Job:
         task_dir: bool = False,
         priority: int = 0,
         resources: Optional[Union[ResourceRequest, Sequence[ResourceRequest]]] = None,
+        crash_limit: Optional[int] = None,
     ) -> ExternalProgram:
         """
         Creates a new task that will execute the provided command.
@@ -72,6 +76,8 @@ class Job:
         :param task_dir: If True, an isolated directory will be created for the task.
         :param priority: Priority of the created task.
         :param resources: List of resource requests required by this task.
+        :param crash_limit: How many times can a worker that executes this task crash before the
+        task is considered to be failed.
         """
         task = ExternalProgram(
             len(self.tasks),
@@ -86,6 +92,7 @@ class Job:
             task_dir=task_dir,
             priority=priority,
             resources=resources,
+            crash_limit=crash_limit,
         )
         self._add_task(task)
         return task
@@ -104,6 +111,7 @@ class Job:
         name: Optional[str] = None,
         priority: int = 0,
         resources: Optional[Union[ResourceRequest, Sequence[ResourceRequest]]] = None,
+        crash_limit: Optional[int] = None,
     ) -> PythonFunction:
         """
         Creates a new task that will execute the provided Python function.
@@ -120,6 +128,8 @@ class Job:
         :param name: Name of the task.
         :param priority: Priority of the created task.
         :param resources: List of resource requests required by this task.
+        :param crash_limit: How many times can a worker that executes this task crash before the
+        task is considered to be failed.
         """
         task = PythonFunction(
             len(self.tasks),
@@ -134,6 +144,7 @@ class Job:
             dependencies=deps,
             priority=priority,
             resources=resources,
+            crash_limit=crash_limit,
         )
         self._add_task(task)
         return task
@@ -146,7 +157,7 @@ class Job:
         task_descriptions = []
         for task in self.tasks:
             task_descriptions.append(task._build(client))
-        return JobDescription(task_descriptions, self.max_fails)
+        return JobDescription(name=self.name, tasks=task_descriptions, max_fails=self.max_fails)
 
 
 @dataclasses.dataclass
